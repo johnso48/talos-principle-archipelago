@@ -158,22 +158,19 @@ local function OnItemsReceived(items)
 
     Logging.LogInfo(string.format("AP: Received %d items", #items))
 
-    local grantList = {}
     for _, item in ipairs(items) do
         local tetId = ItemMapping.GetItemName(item.item)
         if tetId then
-            table.insert(grantList, tetId)
             Logging.LogInfo(string.format("AP: Item received: %s (id=%d from player %d)",
                 tetId, item.item, item.player or 0))
+            -- Grant individually (additive) — never wipe previous grants
+            if GameState and Collection then
+                Collection.GrantItem(GameState, tetId)
+            end
         else
             Logging.LogWarning(string.format("AP: Unknown item id %d from player %d",
                 item.item, item.player or 0))
         end
-    end
-
-    -- Grant all received items
-    if GameState and Collection and #grantList > 0 then
-        Collection.SetGrantedItems(GameState, grantList)
     end
 end
 
@@ -255,6 +252,11 @@ local function DoConnect()
     pendingConnect = false
 
     local server = Config.server
+    -- Ensure the server address has a WebSocket scheme prefix
+    -- lua-apclientpp requires ws:// (or wss://) in the URI
+    if server and not server:match("^wss?://") then
+        server = "ws://" .. server
+    end
     Logging.LogInfo(string.format("AP: Creating AP client on poll coroutine for %s...", server))
 
     local uuid = "" -- lua-apclientpp doesn't require UUID

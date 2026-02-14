@@ -42,19 +42,36 @@ OnLocationCheckedCallback = nil
 -- ============================================================
 -- Initialize Archipelago client
 -- ============================================================
-local apAvailable = APClient.Init(Config, State, Collection, ItemMapping)
-if apAvailable then
-    -- Wire the location checked callback to the AP client
-    OnLocationCheckedCallback = function(tetrominoId)
-        APClient.SendLocationCheck(tetrominoId)
-    end
+local apAvailable = false
+if Config.offline_mode then
+    Logging.LogInfo("Offline mode enabled — AP communication disabled")
+    Logging.LogInfo("Items can be granted/revoked via debug keybinds (F5/F8)")
+    Logging.LogInfo("Pickups will log item names and location IDs without sending to server")
     
-    -- Connect (will happen asynchronously via poll)
-    APClient.Connect()
-    Logging.LogInfo("AP client initialized — connection will be established via poll()")
+    -- Wire a local-only callback that logs and self-grants
+    OnLocationCheckedCallback = function(tetrominoId)
+        local locId = ItemMapping.GetLocationId(tetrominoId)
+        Logging.LogInfo(string.format("[OFFLINE] Location check: %s (location_id=%s)", 
+            tetrominoId, tostring(locId)))
+        -- In offline mode, grant the item directly so the player can progress
+        Collection.GrantItem(State, tetrominoId)
+        Logging.LogInfo(string.format("[OFFLINE] Auto-granted: %s", tetrominoId))
+    end
 else
-    Logging.LogWarning("AP client not available — running in local-only mode")
-    Logging.LogWarning("Items can still be granted/revoked via debug keybinds (F5/F8)")
+    apAvailable = APClient.Init(Config, State, Collection, ItemMapping)
+    if apAvailable then
+        -- Wire the location checked callback to the AP client
+        OnLocationCheckedCallback = function(tetrominoId)
+            APClient.SendLocationCheck(tetrominoId)
+        end
+        
+        -- Connect (will happen asynchronously via poll)
+        APClient.Connect()
+        Logging.LogInfo("AP client initialized — connection will be established via poll()")
+    else
+        Logging.LogWarning("AP client not available — running in local-only mode")
+        Logging.LogWarning("Items can still be granted/revoked via debug keybinds (F5/F8)")
+    end
 end
 
 -- ============================================================
@@ -69,6 +86,13 @@ local function OnTetrominoCollected(tetrominoId)
     -- Mark this location as checked so the item stays hidden
     Collection.MarkLocationChecked(tetrominoId)
     State.CollectedThisSession[tetrominoId] = true
+    
+    -- Delayed UI refresh: the enforce loop will remove the item from TMap
+    -- but the HUD won't update until we explicitly tell it to.
+    LoopAsync(2000, function()
+        Collection.RefreshUI()
+        return true -- run once
+    end)
     
     -- Notify Archipelago client
     if OnLocationCheckedCallback then
@@ -192,15 +216,22 @@ LoopAsync(10, function()
             for _, item in ipairs(items) do
                 if item and item:IsValid() then
                     local id = TetrominoUtils.GetTetrominoId(item)
-                    if id and Collection.ShouldBeCollectable(id) then
-                        -- Remove from TMap so IsTetrominoCollected returns false
-                        -- This allows OnBeginOverlap to proceed with pickup
-                        if State.CurrentProgress and State.CurrentProgress:IsValid() then
-                            pcall(function()
-                                State.CurrentProgress.CollectedTetrominos:Remove(id)
-                            end)
+                    if id then
+                        if Collection.ShouldBeCollectable(id) then
+                            -- Remove from TMap so IsTetrominoCollected returns false
+                            -- This allows OnBeginOverlap to proceed with pickup
+                            if State.CurrentProgress and State.CurrentProgress:IsValid() then
+                                pcall(function()
+                                    State.CurrentProgress.CollectedTetrominos:Remove(id)
+                                end)
+                            end
+                            Visibility.SetTetrominoVisible(item)
+                        elseif Collection.IsLocationChecked(id) and not Collection.IsGranted(id) then
+                            -- Location was checked but item wasn't granted to us
+                            -- (AP sent it to another player). Hide the actor so
+                            -- it doesn't reappear, but do NOT add to TMap.
+                            Visibility.SetTetrominoHidden(item)
                         end
-                        Visibility.SetTetrominoVisible(item)
                     end
                 end
             end

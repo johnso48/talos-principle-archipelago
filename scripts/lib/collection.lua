@@ -55,7 +55,10 @@ function M.EnforceCollectionState(state)
 
     local toRemove = {}
 
-    -- Find items in TMap that are neither granted nor checked
+    -- Find items in TMap that are NOT granted by Archipelago.
+    -- Only granted items belong in the TMap (they count as inventory).
+    -- Checked-but-not-granted items must be removed — the player
+    -- checked the location but AP gave the item to someone else.
     pcall(function()
         local tmap = state.CurrentProgress.CollectedTetrominos
         if not tmap then return end
@@ -63,31 +66,24 @@ function M.EnforceCollectionState(state)
         tmap:ForEach(function(keyParam, valueParam)
             local key = nil
             pcall(function() key = keyParam:get():ToString() end)
-            if key and not M.GrantedItems[key] and not M.CheckedLocations[key] then
+            if key and not M.GrantedItems[key] then
                 table.insert(toRemove, key)
             end
         end)
     end)
 
-    -- Remove non-granted, non-checked items
+    -- Remove non-granted items from TMap
     if #toRemove > 0 then
         for _, id in ipairs(toRemove) do
             pcall(function()
                 state.CurrentProgress.CollectedTetrominos:Remove(id)
             end)
         end
-        Logging.LogDebug(string.format("Enforced: removed %d non-granted/non-checked items from TMap", #toRemove))
+        Logging.LogDebug(string.format("Enforced: removed %d non-granted items from TMap", #toRemove))
     end
 
-    -- Ensure all granted items are in TMap (usable)
+    -- Ensure all granted items are in TMap (usable in arrangers/doors)
     for id, _ in pairs(M.GrantedItems) do
-        pcall(function()
-            state.CurrentProgress.CollectedTetrominos:Add(id, false)
-        end)
-    end
-
-    -- Ensure all checked items are in TMap (persist after pickup)
-    for id, _ in pairs(M.CheckedLocations) do
         pcall(function()
             state.CurrentProgress.CollectedTetrominos:Add(id, false)
         end)
@@ -184,14 +180,19 @@ local function RefreshTetrominoUI(tetrominoId)
             Logging.LogError("  Error calling ArrangerInfo:UpdateInventory(): " .. tostring(err2))
         end
 
-        -- Also trigger UpdateExplorationMode on the widget
-        local ok3, err3 = pcall(function()
-            hudWidget:UpdateExplorationMode()
-            Logging.LogDebug("  UpdateExplorationMode() called successfully")
+        -- Defer UpdateExplorationMode to the next tick so the engine
+        -- finishes processing the TMap mutation first. Calling it
+        -- synchronously causes "ArrayNum exceeds ArrayMax" crashes.
+        local widgetRef = hudWidget
+        LoopAsync(100, function()
+            pcall(function()
+                if widgetRef and widgetRef:IsValid() then
+                    widgetRef:UpdateExplorationMode()
+                    Logging.LogDebug("  UpdateExplorationMode() called successfully (deferred)")
+                end
+            end)
+            return true -- run once
         end)
-        if not ok3 then
-            Logging.LogError("  Error calling UpdateExplorationMode(): " .. tostring(err3))
-        end
     else
         Logging.LogDebug("  No HUD widget found, skipping widget refresh")
     end
@@ -307,6 +308,11 @@ function M.DumpState()
     Logging.LogInfo(string.format("=== Collection State ==="))
     Logging.LogInfo(string.format("  Granted items (%d): %s", #granted, table.concat(granted, ", ")))
     Logging.LogInfo(string.format("  Checked locations (%d): %s", #checked, table.concat(checked, ", ")))
+end
+
+-- Expose UI refresh for external callers
+function M.RefreshUI()
+    RefreshTetrominoUI(nil)
 end
 
 return M

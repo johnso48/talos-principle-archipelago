@@ -1,6 +1,7 @@
 {
-    "server": "localhost:38281",
+    "server": "127.0.0.1:38281",
     "slot_name": "Player1",
     "password": "",
-    "game": "The Talos Principle Reawakened"
+    "game": "The Talos Principle",
+    "offline_mode": "true"
 }
