@@ -23,6 +23,28 @@ local TetrominoUtils = require("lib.tetromino_utils")
 local M = {}
 
 -- ============================================================
+-- TMap helpers
+-- ============================================================
+
+-- Add an item to the CollectedTetrominos TMap only if it is not
+-- already present.  The boolean value in the TMap tracks whether
+-- the tetromino has been used in a door; blindly calling
+-- :Add(id, false) would reset that flag on every sync cycle.
+local function TMapAddPreserving(tmap, id)
+    local exists = false
+    pcall(function()
+        local val = tmap:Find(id)
+        -- val is the stored boolean; nil means key not found.
+        if val ~= nil then
+            exists = true
+        end
+    end)
+    if not exists then
+        tmap:Add(id, false)
+    end
+end
+
+-- ============================================================
 -- State
 -- ============================================================
 
@@ -95,9 +117,10 @@ function M.EnforceCollectionState(state)
     end
 
     -- Ensure all granted items are in TMap (usable in arrangers/doors)
+    -- Use TMapAddPreserving so we don't reset the door-usage flag.
     for id, _ in pairs(M.GrantedItems) do
         pcall(function()
-            state.CurrentProgress.CollectedTetrominos:Add(id, false)
+            TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, id)
         end)
     end
 end
@@ -251,10 +274,10 @@ function M.GrantItem(state, tetrominoId)
         Logging.LogInfo(string.format("Item granted: %s", tetrominoId))
     end
 
-    -- Add to TMap for immediate usability
+    -- Add to TMap for immediate usability (preserve door-usage flag)
     if state.CurrentProgress and state.CurrentProgress:IsValid() then
         pcall(function()
-            state.CurrentProgress.CollectedTetrominos:Add(tetrominoId, false)
+            TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, tetrominoId)
         end)
     end
 
@@ -286,11 +309,11 @@ function M.SetGrantedItems(state, itemIds)
     end
     Logging.LogInfo(string.format("Bulk granted %d items", #itemIds))
 
-    -- Add all to TMap for immediate usability
+    -- Add all to TMap for immediate usability (preserve door-usage flags)
     if state.CurrentProgress and state.CurrentProgress:IsValid() then
         for _, id in ipairs(itemIds) do
             pcall(function()
-                state.CurrentProgress.CollectedTetrominos:Add(id, false)
+                TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, id)
             end)
         end
     end

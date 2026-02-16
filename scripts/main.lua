@@ -514,44 +514,48 @@ RegisterKeyBind(Key.F8, function()
     Logging.LogInfo("=== F8: Granting ALL gate items (full unlock) ===")
     Progress.FindProgressObject(State, true)
     local allGateItems = {
-        -- Connector
-        "MT1", "ML1", "MT2",
-        -- Hexahedron
-        "MT4", "MT5", "ML2",
-        -- Fans
-        "MT6", "MT7", "ML3", "MZ3", "MS1",
-        -- Playback
-        "MT8", "MT9", "MJ1", "MS2", "MZ4",
-        -- World A1 gate
-        "DJ1", "DJ2", "DZ1",
-        -- World A gate
-        "DJ3", "DI1", "DL1", "DZ2",
-        -- World B gate
-        "DL2", "DT1", "DT2", "DZ3", "DI2",
-        -- World C gate (2 Green T, 2 Green J, 1 Green L, 1 Green Z)
-        "DT3", "DT4", "DJ4", "DJ5", "DL3", "DZ4",
-        -- Additional A-world items mentioned
-        "MZ1", "MZ2", "NZ1", "NL1", "NL2", "NL3", "NZ2", "NL4", "NO1", "NT1",
-        -- Additional B-world items mentioned
-        "NL5", "NL6", "NT3", "NT4",
-        -- World B7 Golden pieces (platform unlock)
-        "MO1", "MI1",
-        -- World B7 Red pieces
-        "NJ1", "NI3",
-        -- World C1 Red pieces
-        "NZ4", "NJ2", "NI4", "NT5",
-        -- World C2 Red pieces
-        "NZ5", "NO2", "NT6", "NS2",
-        -- World C3 Red pieces
-        "NJ3", "NO3", "NZ6", "NT7",
-        -- World C4 Red pieces
-        "NT8", "NI5", "NS3", "NT9",
-        -- World C5 Red pieces
-        "NI6", "NO4", "NO5", "NT10",
-        -- World C6 Red pieces
-        "NS4", "NJ4", "NO6",
-        -- World C7 Red pieces
-        "NT11", "NO7", "NT12", "NL10"
+        -- World A1 (7)
+        "DJ3",  "MT1",  "DZ1",  "DJ2",  "DJ1",  "ML1",  "DI1",
+        -- World A2 (3)
+        "ML2",  "DL1",  "DZ2",
+        -- World A3 (4)
+        "MT2",  "DZ3",  "NL1",  "MT3",
+        -- World A4 (4)
+        "MZ1",  "MZ2",  "MT4",  "MT5",
+        -- World A5 (5)
+        "NZ1",  "DI2",  "DT1",  "DT2",  "DL2",
+        -- World A6 (4)
+        "DZ4",  "NL2",  "NL3",  "NZ2",
+        -- World A7 (5)
+        "NL4",  "DL3",  "NT1",  "NO1",  "DT3",
+        -- World B1 (5)
+        "ML3",  "MZ3",  "MS1",  "MT6",  "MT7",
+        -- World B2 (4)
+        "NL5",  "MS2",  "MT8",  "MZ4",
+        -- World B3 (3)
+        "MT9",  "MJ1",  "NL6",
+        -- World B4 (6)
+        "NT3",  "NT4",  "DT4",  "DJ4",  "NL7",  "NL8",
+        -- World B5 (5)
+        "NI1",  "NL9",  "NS1",  "DJ5",  "NZ3",
+        -- World B6 (3)
+        "NI2",  "MT10", "ML4",
+        -- World B7 (4)
+        "NJ1",  "NI3",  "MO1",  "MI1",
+        -- World C1 (4)
+        "NZ4",  "NJ2",  "NI4",  "NT5",
+        -- World C2 (4)
+        "NZ5",  "NO2",  "NT6",  "NS2",
+        -- World C3 (4)
+        "NJ3",  "NO3",  "NZ6",  "NT7",
+        -- World C4 (4)
+        "NT8",  "NI5",  "NS3",  "NT9",
+        -- World C5 (4)
+        "NI6",  "NO4",  "NO5",  "NT10",
+        -- World C6 (3)
+        "NS4",  "NJ4",  "NO6",
+        -- World C7 (4)
+        "NT11", "NO7",  "NT12", "NL10"
     }
     for _, id in ipairs(allGateItems) do
         Collection.GrantItem(State, id)
