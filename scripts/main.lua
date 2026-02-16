@@ -509,15 +509,6 @@ RegisterKeyBind(Key.F6, function()
     Progress.DumpSaveFileContents(State)
 end)
 
--- F7: Grant DJ1 (first gate item in World A) for testing
-RegisterKeyBind(Key.F7, function()
-    Logging.LogInfo("=== F7: Granting DJ1 (first gate item in World A) ===")
-    Progress.FindProgressObject(State, true)
-    Collection.GrantItem(State, "DJ1")
-    Logging.LogInfo("DJ1 granted — should be visible and collectible in World A1")
-    Collection.DumpState()
-end)
-
 -- F8: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
 RegisterKeyBind(Key.F8, function()
     Logging.LogInfo("=== F8: Granting ALL gate items (full unlock) ===")
@@ -541,8 +532,8 @@ RegisterKeyBind(Key.F8, function()
         "ML3",  "MZ3",  "MS1",  "MT6",  "MT7",
         -- World B2 (4)
         "NL5",  "MS2",  "MT8",  "MZ4",
-        -- World B3 (3)
-        "MT9",  "MJ1",  "NL6",
+        -- World B3 (4)
+        "MT9",  "MJ1",  "NT2", "NL6",
         -- World B4 (6)
         "NT3",  "NT4",  "DT4",  "DJ4",  "NL7",  "NL8",
         -- World B5 (5)

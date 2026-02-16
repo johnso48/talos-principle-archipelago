@@ -31,7 +31,7 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
    - Copy `lua-apclientpp.dll` to `scripts/` folder
 
 4. **Configure connection**:
-   - Open the `scripts/config.json` file
+   - Open the `config.json` file
    - Edit with your AP server details:
      ```json
      {

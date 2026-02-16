@@ -1,6 +1,6 @@
 -- ============================================================
 -- Configuration loader
--- Reads config.json from the mod's scripts directory.
+-- Reads config.json from the mod's root directory.
 -- Falls back to defaults if the file is missing or malformed.
 -- ============================================================
 
@@ -32,32 +32,37 @@ end
 -- Load config from file
 -- ============================================================
 function M.Load()
-    -- Determine the scripts directory from the module path.
+    -- Determine the mod root directory from the module path.
     -- debug.getinfo(1) gives us the path to THIS file (lib/config.lua),
-    -- so we go up one level to reach the scripts/ directory where config.json lives.
-    local scriptDir = nil
+    -- so we go up three levels to reach the ArchipelagoMod/ directory where config.json lives.
+    local modRootDir = nil
     pcall(function()
         local info = debug.getinfo(1, "S")
         if info and info.source then
             local src = info.source:gsub("^@", "")
-            -- src is something like .../scripts/lib/config.lua
-            -- First strip the filename to get .../scripts/lib
+            -- src is something like .../ArchipelagoMod/scripts/lib/config.lua
+            -- First strip the filename to get .../ArchipelagoMod/scripts/lib
             local libDir = src:match("(.+)[/\\][^/\\]+$")
-            -- Then strip "lib" to get .../scripts
+            -- Then strip "lib" to get .../ArchipelagoMod/scripts
+            local scriptDir = nil
             if libDir then
                 scriptDir = libDir:match("(.+)[/\\][^/\\]+$")
+            end
+            -- Finally strip "scripts" to get .../ArchipelagoMod
+            if scriptDir then
+                modRootDir = scriptDir:match("(.+)[/\\][^/\\]+$")
             end
         end
     end)
 
-    -- Build search paths: scripts dir first, then UE4SS working directory fallback
+    -- Build search paths: mod root dir first, then UE4SS working directory fallback
     local paths = {}
-    if scriptDir then
-        table.insert(paths, scriptDir .. "\\config.json")
-        table.insert(paths, scriptDir .. "/config.json")
+    if modRootDir then
+        table.insert(paths, modRootDir .. "\\config.json")
+        table.insert(paths, modRootDir .. "/config.json")
     end
     -- Fallback: try relative to UE4SS working dir (Talos1/Binaries/Win64)
-    table.insert(paths, "Mods\\ArchipelagoMod\\scripts\\config.json")
+    table.insert(paths, "Mods\\ArchipelagoMod\\config.json")
     table.insert(paths, "config.json")
 
     local configContent = nil

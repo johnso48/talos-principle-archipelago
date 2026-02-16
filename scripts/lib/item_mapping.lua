@@ -73,7 +73,7 @@ local ALL_TETROMINOES = {
     "ML3",  "MZ3",  "MS1",  "MT6",  "MT7",
     -- World B2 (4)
     "NL5",  "MS2",  "MT8",  "MZ4",
-    -- World B3 (3)
+    -- World B3 (4)
     "MT9",  "MJ1",  "NT2", "NL6",
     -- World B4 (6)
     "NT3",  "NT4",  "DT4",  "DJ4",  "NL7",  "NL8",

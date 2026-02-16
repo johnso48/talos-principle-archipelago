@@ -140,13 +140,13 @@ end
 -- to catch any ending that slipped through both hooks and the
 -- URL poll above.
 --
--- IMPORTANT: We delay polling for ~5 seconds (50 ticks at 100ms)
+-- IMPORTANT: We delay polling for ~10 seconds (100 ticks at 100ms)
 -- after mod load because native C++ calls can crash if invoked
 -- before subsystems are fully initialized. pcall cannot catch
 -- C++-level crashes.
 -- ============================================================
 local previousGameCompleted = false
-local pollWarmup = 50  -- skip first 50 calls (~5 seconds)
+local pollWarmup = 100  -- skip first 100 calls (~10 seconds)
 local customPropertyWarmup = 100  -- register custom property after 100 ticks (~10 seconds)
 local customPropertyRegistered = false
 M._lastPolledUrl = ""
