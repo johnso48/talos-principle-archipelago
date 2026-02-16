@@ -111,6 +111,13 @@ local function OnSlotConnected(slot_data)
     Logging.LogInfo(string.format("AP: Slot connected! player=%d team=%d",
         M.PlayerSlot or -1, M.TeamNumber or -1))
 
+    -- Reset item counters and granted items for a clean replay.
+    -- OnItemsReceived will replay all items from index 0 and rebuild grants.
+    ItemMapping.ResetItemCounters()
+    if Collection then
+        Collection.GrantedItems = {}
+    end
+
     -- Log player list
     local players = ap:get_players()
     if players then
@@ -186,9 +193,9 @@ local function OnItemsReceived(items)
     local grantedCount = 0
     local unknownCount = 0
     for _, item in ipairs(items) do
-        local tetId = ItemMapping.GetItemName(item.item)
+        local tetId = ItemMapping.ResolveNextItem(item.item)
         if tetId then
-            Logging.LogDebug(string.format("AP: Item received: %s (id=%d from player %d)",
+            Logging.LogDebug(string.format("AP: Item received: %s (ap_id=%d from player %d)",
                 tetId, item.item, item.player or 0))
             -- Grant individually (additive) — never wipe previous grants
             if GameState and Collection then
@@ -196,13 +203,19 @@ local function OnItemsReceived(items)
                 grantedCount = grantedCount + 1
             end
         else
-            Logging.LogWarning(string.format("AP: Unknown item id %d from player %d",
-                item.item, item.player or 0))
+            local prefix = ItemMapping.GetItemPrefix(item.item)
+            if prefix then
+                Logging.LogWarning(string.format("AP: %s item exhausted (ap_id=%d from player %d)",
+                    prefix, item.item, item.player or 0))
+            else
+                Logging.LogWarning(string.format("AP: Unknown item id %d from player %d",
+                    item.item, item.player or 0))
+            end
             unknownCount = unknownCount + 1
         end
     end
 
-    Logging.LogInfo(string.format("AP: Processed items — %d granted, %d unknown", grantedCount, unknownCount))
+    Logging.LogInfo(string.format("AP: Processed items — %d granted, %d skipped/unknown", grantedCount, unknownCount))
 
     -- Ensure APSynced is set
     if Collection then

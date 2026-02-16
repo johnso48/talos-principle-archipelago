@@ -1,14 +1,16 @@
 -- ============================================================
 -- Archipelago Item & Location ID Mappings
 --
--- Maps between in-game tetromino IDs (e.g. "DJ3", "MT1") and
--- Archipelago's numeric item/location IDs.
+-- Items: The AP server uses 19 item IDs, one per shape+color
+-- combination. When a duplicate is received, we grant the next
+-- tetromino in sequence for that shape+color.
+--   Golden = M{shape}{n}   Green = D{shape}{n}   Red = N{shape}{n}
+--
+-- Locations: Each physical tetromino / star is still its own
+-- location with a unique sequential AP location ID.
 --
 -- NOTE: These IDs must match the AP world definition for
--- "The Talos Principle Reawakened". The base item ID and
--- location ID should be assigned during world registration.
--- These are PLACEHOLDER values that need to be updated to
--- match the actual AP world once it's created.
+-- "The Talos Principle Reawakened".
 -- ============================================================
 
 local Logging = require("lib.logging")
@@ -21,6 +23,33 @@ local M = {}
 -- ============================================================
 M.BASE_ITEM_ID     = 0x540000  -- 5505024
 M.BASE_LOCATION_ID = 0x540000  -- 5505024
+
+-- ============================================================
+-- AP Item IDs → Shape+Color prefix
+-- The AP server sends one of 19 item types. Each type maps to a
+-- prefix (colour+shape). Multiple copies grant sequential pieces.
+-- ============================================================
+local AP_ITEM_IDS = {
+    [0x540000] = "DJ",  -- Green J
+    [0x540001] = "DZ",  -- Green Z
+    [0x540002] = "DI",  -- Green I
+    [0x540003] = "DL",  -- Green L
+    [0x540004] = "DT",  -- Green T
+    [0x540005] = "MT",  -- Golden T
+    [0x540006] = "ML",  -- Golden L
+    [0x540007] = "MZ",  -- Golden Z
+    [0x540008] = "MS",  -- Golden S
+    [0x540009] = "MJ",  -- Golden J
+    [0x54000A] = "MO",  -- Golden O
+    [0x54000B] = "MI",  -- Golden I
+    [0x54000C] = "NL",  -- Red L
+    [0x54000D] = "NZ",  -- Red Z
+    [0x54000E] = "NT",  -- Red T
+    [0x54000F] = "NI",  -- Red I
+    [0x540010] = "NJ",  -- Red J
+    [0x540011] = "NO",  -- Red O
+    [0x540012] = "NS",  -- Red S
+}
 
 -- ============================================================
 -- All tetrominoes in the game (from BotPuzzleDatabase.csv)
@@ -45,7 +74,7 @@ local ALL_TETROMINOES = {
     -- World B2 (4)
     "NL5",  "MS2",  "MT8",  "MZ4",
     -- World B3 (3)
-    "MT9",  "MJ1",  "NL6",
+    "MT9",  "MJ1",  "NT2", "NL6",
     -- World B4 (6)
     "NT3",  "NT4",  "DT4",  "DJ4",  "NL7",  "NL8",
     -- World B5 (5)
@@ -109,67 +138,136 @@ local ALL_STARS = {
 }
 
 -- ============================================================
+-- Tetromino sequences by prefix
+-- Built dynamically from ALL_TETROMINOES, sorted numerically.
+-- e.g. TETROMINO_SEQUENCES["DJ"] = {"DJ1", "DJ2", "DJ3", "DJ4", "DJ5"}
+-- ============================================================
+local TETROMINO_SEQUENCES = {}
+
+-- Counter tracking: how many of each prefix have been received from AP
+local ReceivedCounts = {}
+
+-- ============================================================
 -- Build lookup tables
 -- ============================================================
 
--- tetrominoId -> AP item ID
-M.ItemNameToId = {}
--- AP item ID -> tetrominoId
-M.ItemIdToName = {}
--- tetrominoId -> AP location ID (same mapping — the location is where the item sits)
+-- tetrominoId -> AP location ID
 M.LocationNameToId = {}
 -- AP location ID -> tetrominoId
 M.LocationIdToName = {}
--- puzzleCode -> tetrominoId
+-- puzzleCode -> starId
 M.PuzzleToTetromino = {}
+
+local function BuildSequences()
+    TETROMINO_SEQUENCES = {}
+    for _, tetId in ipairs(ALL_TETROMINOES) do
+        local prefix = tetId:match("^(%a+)%d+$")
+        if prefix then
+            if not TETROMINO_SEQUENCES[prefix] then
+                TETROMINO_SEQUENCES[prefix] = {}
+            end
+            table.insert(TETROMINO_SEQUENCES[prefix], tetId)
+        end
+    end
+    -- Sort each sequence by embedded number
+    for prefix, seq in pairs(TETROMINO_SEQUENCES) do
+        table.sort(seq, function(a, b)
+            return tonumber(a:match("%d+$")) < tonumber(b:match("%d+$"))
+        end)
+    end
+    -- Log sequences
+    for prefix, seq in pairs(TETROMINO_SEQUENCES) do
+        Logging.LogDebug(string.format("Tetromino sequence %s (%d): %s",
+            prefix, #seq, table.concat(seq, ", ")))
+    end
+end
 
 local function BuildTables()
     local idx = 0
 
-    -- Tetrominoes: each one is both an item (grant) and a location (check)
-    for _, tetId in ipairs(ALL_TETROMINOES) do
-        local itemId = M.BASE_ITEM_ID + idx
-        local locId  = M.BASE_LOCATION_ID + idx
+    -- Build tetromino sequences for item resolution
+    BuildSequences()
 
-        M.ItemNameToId[tetId]   = itemId
-        M.ItemIdToName[itemId]  = tetId
+    -- Locations: each tetromino is a unique location
+    for _, tetId in ipairs(ALL_TETROMINOES) do
+        local locId = M.BASE_LOCATION_ID + idx
         M.LocationNameToId[tetId] = locId
         M.LocationIdToName[locId] = tetId
-
         idx = idx + 1
     end
 
-    -- Stars
+    -- Stars: also unique locations
     for _, entry in ipairs(ALL_STARS) do
         local puzzleCode = entry[1]
         local starId = entry[2]
-
-        local itemId = M.BASE_ITEM_ID + idx
-        local locId  = M.BASE_LOCATION_ID + idx
-
-        M.ItemNameToId[starId]   = itemId
-        M.ItemIdToName[itemId]   = starId
+        local locId = M.BASE_LOCATION_ID + idx
         M.LocationNameToId[starId] = locId
         M.LocationIdToName[locId]  = starId
         M.PuzzleToTetromino[puzzleCode] = starId
-
         idx = idx + 1
     end
 
-    Logging.LogInfo(string.format("Item mappings built: %d items, %d locations", idx, idx))
+    local seqCount = 0
+    for _ in pairs(TETROMINO_SEQUENCES) do seqCount = seqCount + 1 end
+    Logging.LogInfo(string.format("Mappings built: %d locations, %d item types (sequences)",
+        idx, seqCount))
 end
 
 -- ============================================================
--- Query helpers
+-- Item resolution (AP item ID → concrete tetromino)
 -- ============================================================
 
-function M.GetItemId(tetrominoId)
-    return M.ItemNameToId[tetrominoId]
+--- Get the shape+color prefix for an AP item ID.
+--- @param apItemId number The AP item ID
+--- @return string|nil The prefix (e.g. "DJ", "MT") or nil if unknown
+function M.GetItemPrefix(apItemId)
+    return AP_ITEM_IDS[apItemId]
 end
 
-function M.GetItemName(apItemId)
-    return M.ItemIdToName[apItemId]
+--- Resolve the next concrete tetromino for a received AP item.
+--- Increments the internal counter for the shape+color and returns
+--- the next tetromino in sequence (e.g. "DJ1", then "DJ2", ...).
+--- @param apItemId number The AP item ID
+--- @return string|nil The concrete tetromino ID, or nil if exhausted/unknown
+function M.ResolveNextItem(apItemId)
+    local prefix = AP_ITEM_IDS[apItemId]
+    if not prefix then
+        Logging.LogWarn(string.format("Unknown AP item ID: %d (0x%X)", apItemId, apItemId))
+        return nil
+    end
+
+    local seq = TETROMINO_SEQUENCES[prefix]
+    if not seq or #seq == 0 then
+        Logging.LogWarn(string.format("No tetromino sequence for prefix: %s", prefix))
+        return nil
+    end
+
+    -- Increment counter for this prefix
+    ReceivedCounts[prefix] = (ReceivedCounts[prefix] or 0) + 1
+    local count = ReceivedCounts[prefix]
+
+    if count > #seq then
+        Logging.LogWarn(string.format("Received more %s items (%d) than exist (%d) — ignoring",
+            prefix, count, #seq))
+        return nil
+    end
+
+    local tetId = seq[count]
+    Logging.LogInfo(string.format("Resolved AP item %d (0x%X) -> %s [%s %d/%d]",
+        apItemId, apItemId, tetId, prefix, count, #seq))
+    return tetId
 end
+
+--- Reset received-item counters. Must be called on (re)connect before
+--- the AP server replays all received items.
+function M.ResetItemCounters()
+    ReceivedCounts = {}
+    Logging.LogInfo("Item received counters reset")
+end
+
+-- ============================================================
+-- Query helpers (locations)
+-- ============================================================
 
 function M.GetLocationId(tetrominoId)
     return M.LocationNameToId[tetrominoId]
@@ -189,10 +287,10 @@ function M.GetAllLocationIds()
     return ids
 end
 
--- Get all item IDs as a flat list
+-- Get all AP item IDs (the 19 shape+color types)
 function M.GetAllItemIds()
     local ids = {}
-    for id, _ in pairs(M.ItemIdToName) do
+    for id, _ in pairs(AP_ITEM_IDS) do
         table.insert(ids, id)
     end
     table.sort(ids)

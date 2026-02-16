@@ -112,7 +112,7 @@ local function OnTetrominoCollected(tetrominoId)
     
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
     -- but the HUD won't update until we explicitly tell it to.
-    LoopAsync(2000, function()
+    LoopAsync(5000, function()
         Collection.RefreshUI()
         return true -- run once
     end)
@@ -507,6 +507,15 @@ RegisterKeyBind(Key.F6, function()
     end
     
     Progress.DumpSaveFileContents(State)
+end)
+
+-- F7: Grant DJ1 (first gate item in World A) for testing
+RegisterKeyBind(Key.F7, function()
+    Logging.LogInfo("=== F7: Granting DJ1 (first gate item in World A) ===")
+    Progress.FindProgressObject(State, true)
+    Collection.GrantItem(State, "DJ1")
+    Logging.LogInfo("DJ1 granted — should be visible and collectible in World A1")
+    Collection.DumpState()
 end)
 
 -- F8: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
