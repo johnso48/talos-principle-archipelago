@@ -17,8 +17,10 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
 ### Setup
 
 1. **Install UE4SS**:
-   - Download [UE4SS experimental-latest](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest)
-   - Extract to `Talos1/Binaries/Win64/` (the folder containing `Talos-Win64-Shipping.exe`)
+   - Download [UE4SS experimental-latest](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest). Ensure it is not the zDEV version
+   - Extract the contents of the zip folder.
+   - Copy the dwmapi.dll to the Talos1/Binaries/win64
+   - Copy the ue4ss folder in the top level directory of your game
    - **Note**: The experimental-latest version is required for Unreal Engine 5.4 support
 
 2. **Install the mod**:
