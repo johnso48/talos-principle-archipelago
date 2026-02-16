@@ -13,3 +13,4 @@ Thumbs.db
 # Temporary files
 scripts/temp/
 *.tmp
+scripts/lua-apclientpp.dll
