@@ -118,8 +118,11 @@ local function OnTetrominoCollected(tetrominoId)
     
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
     -- but the HUD won't update until we explicitly tell it to.
+    -- Guard: skip if a level transition started while we were waiting.
     LoopAsync(5000, function()
-        Collection.RefreshUI()
+        if State.LevelTransitionCooldown <= 0 then
+            Collection.RefreshUI()
+        end
         return true -- run once
     end)
     
@@ -210,6 +213,34 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
 end)
 
 -- ============================================================
+-- Hook level OPEN — fires at the START of a level transition,
+-- before actors are destroyed. This is critical: the other hooks
+-- (ClientRestart, SetTalosSaveGameInstance) only fire AFTER the
+-- new level has loaded. Without this, the 5ms visibility loop
+-- and 100ms enforcement loop continue accessing actors and TMap
+-- references that are being destroyed mid-transition.
+-- ============================================================
+pcall(function()
+    RegisterHook("/Script/Talos.TalosGameInstance:OpenLevel", function(Context)
+        Logging.LogInfo("OpenLevel called — pausing all loops for level transition")
+        State.LevelTransitionCooldown = 100  -- 10 seconds (100 * 100ms)
+        State.CurrentProgress = nil
+        State.TrackedItems = {}
+        VisibilityApplied = {}
+    end)
+end)
+
+pcall(function()
+    RegisterHook("/Script/Talos.TalosGameInstance:OpenLevelBySoftObjectPtr", function(Context)
+        Logging.LogInfo("OpenLevelBySoftObjectPtr called — pausing all loops for level transition")
+        State.LevelTransitionCooldown = 100
+        State.CurrentProgress = nil
+        State.TrackedItems = {}
+        VisibilityApplied = {}
+    end)
+end)
+
+-- ============================================================
 -- Arranger (puzzle gate) detection — polling approach
 -- Uses AArranger::bIsEditingPuzzle (bool at 0x0598) which is true
 -- while the player is actively using the arranger's puzzle grid.
@@ -285,6 +316,11 @@ LoopAsync(100, function()
             Progress.FindProgressObject(State)
         end
 
+        -- Re-check after find — still in transition if nil
+        if not State.CurrentProgress or not State.CurrentProgress:IsValid() then
+            return
+        end
+
         if State.CurrentProgress and State.CurrentProgress:IsValid() then
             -- Poll arranger state — skip TMap manipulation while any arranger is in use
             State.ArrangerActive = IsAnyArrangerActive()
@@ -339,7 +375,19 @@ LoopAsync(5, function()
         return false
     end
 
+    -- Bail early if progress is gone (e.g. mid-transition)
+    if not State.CurrentProgress then
+        return false
+    end
+
     local ok, err = pcall(function()
+        -- Re-validate progress on every tick — it may have been
+        -- destroyed between the nil check above and now
+        if not State.CurrentProgress:IsValid() then
+            State.CurrentProgress = nil
+            return
+        end
+
         local items = FindAllOf("BP_TetrominoItem_C")
         if items then
             for _, item in ipairs(items) do

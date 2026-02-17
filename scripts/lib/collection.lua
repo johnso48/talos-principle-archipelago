@@ -110,7 +110,9 @@ function M.EnforceCollectionState(state)
     if #toRemove > 0 then
         for _, id in ipairs(toRemove) do
             pcall(function()
-                state.CurrentProgress.CollectedTetrominos:Remove(id)
+                if state.CurrentProgress and state.CurrentProgress:IsValid() then
+                    state.CurrentProgress.CollectedTetrominos:Remove(id)
+                end
             end)
         end
         Logging.LogDebug(string.format("Enforced: removed %d non-granted items from TMap", #toRemove))
@@ -120,7 +122,9 @@ function M.EnforceCollectionState(state)
     -- Use TMapAddPreserving so we don't reset the door-usage flag.
     for id, _ in pairs(M.GrantedItems) do
         pcall(function()
-            TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, id)
+            if state.CurrentProgress and state.CurrentProgress:IsValid() then
+                TMapAddPreserving(state.CurrentProgress.CollectedTetrominos, id)
+            end
         end)
     end
 end
