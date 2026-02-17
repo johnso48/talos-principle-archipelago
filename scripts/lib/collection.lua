@@ -177,90 +177,96 @@ end
 --       .ArrangerInfo → UArrangerInfoPanel
 --         :UpdateInventory()  ← refreshes tetromino counters
 --       :UpdateExplorationMode() ← refreshes exploration-mode overlay
+--
+-- IMPORTANT: UpdateExplorationMode reads the CollectedTetrominos TMap
+-- internally. If called while the TMap is being mutated (e.g. from
+-- the enforce loop or a grant), the engine hits
+-- "ArrayNum exceeds ArrayMax" and crashes. To avoid this:
+--   1. Debounce: only ONE refresh is scheduled per batch of grants.
+--   2. Delay: wait 500ms so TMap mutations from grant/enforce settle.
+--   3. ExecuteInGameThread: ensure we run on a clean engine frame.
+
+local _uiRefreshPending = false
+
 local function RefreshTetrominoUI(tetrominoId)
     Logging.LogDebug("RefreshTetrominoUI called for: " .. tostring(tetrominoId))
 
-    -- === Step 1: Find the HUD actor and navigate to the widget ===
-    local hudWidget = nil
-    local ok, err = pcall(function()
-        local hudActors = FindAllOf("BP_TalosHUD_C")
-        if not hudActors then
-            Logging.LogDebug("  No BP_TalosHUD_C actors found")
-            return
-        end
-        Logging.LogDebug(string.format("  Found %d BP_TalosHUD_C actors", #hudActors))
-        for _, hudActor in ipairs(hudActors) do
-            if hudActor and hudActor:IsValid() and hudActor.WidgetRoot then
-                hudWidget = hudActor.WidgetRoot
-                Logging.LogDebug("  Got WidgetRoot from BP_TalosHUD_C")
-                break
-            end
-        end
-    end)
-    if not ok then
-        Logging.LogError("  Error finding HUD actor: " .. tostring(err))
-    end
-
-    -- === Step 2: Refresh ArrangerInfoPanel.UpdateInventory() ===
-    if hudWidget then
-        local ok2, err2 = pcall(function()
-            if hudWidget.ArrangerInfo then
-                -- hudWidget.ArrangerInfo:UpdateInventory()
-                Logging.LogDebug("  ArrangerInfo:UpdateInventory() called successfully")
-            else
-                Logging.LogDebug("  hudWidget.ArrangerInfo is nil")
-            end
-        end)
-        if not ok2 then
-            Logging.LogError("  Error calling ArrangerInfo:UpdateInventory(): " .. tostring(err2))
-        end
-
-        -- Defer UpdateExplorationMode to the next tick so the engine
-        -- finishes processing the TMap mutation first. Calling it
-        -- synchronously causes "ArrayNum exceeds ArrayMax" crashes.
-        local widgetRef = hudWidget
-        LoopAsync(100, function()
-            local ok3, err3 = pcall(function()
-                if widgetRef and widgetRef:IsValid() then
-                    widgetRef:UpdateExplorationMode()
-                    Logging.LogDebug("  UpdateExplorationMode() called successfully (deferred)")
-                else
-                    Logging.LogDebug("  widgetRef invalid during deferred UpdateExplorationMode, skipping")
-                end
-            end)
-            if not ok3 then
-                Logging.LogDebug("  Deferred UpdateExplorationMode() error (level transition?): " .. tostring(err3))
-            end
-            return true -- run once
-        end)
-    else
-        Logging.LogDebug("  No HUD widget found, skipping widget refresh")
-    end
-
-    -- === Step 3: Notify arrangers of the newly collected item ===
-    local targetItem = nil
+    -- === Notify arrangers immediately (safe, doesn't touch TMap) ===
     if tetrominoId then
-        targetItem = TetrominoUtils.FindTetrominoItemById(tetrominoId)
-    end
-
-    if targetItem then
-        local ok4, err4 = pcall(function()
-            local arrangers = FindAllOf("BP_Arranger_C")
-            if arrangers then
-                Logging.LogDebug(string.format("  Found %d BP_Arranger_C actors", #arrangers))
-                for _, arranger in ipairs(arrangers) do
-                    if arranger and arranger:IsValid() then
-                        pcall(function() arranger:OnScriptTetrominoCollected_BP(targetItem) end)
+        local targetItem = TetrominoUtils.FindTetrominoItemById(tetrominoId)
+        if targetItem then
+            pcall(function()
+                local arrangers = FindAllOf("BP_Arranger_C")
+                if arrangers then
+                    Logging.LogDebug(string.format("  Found %d BP_Arranger_C actors", #arrangers))
+                    for _, arranger in ipairs(arrangers) do
+                        if arranger and arranger:IsValid() then
+                            pcall(function() arranger:OnScriptTetrominoCollected_BP(targetItem) end)
+                        end
                     end
                 end
-            else
-                Logging.LogDebug("  No BP_Arranger_C actors found")
-            end
-        end)
-        if not ok4 then
-            Logging.LogError("  Error notifying arrangers: " .. tostring(err4))
+            end)
         end
     end
+
+    -- === Debounced HUD widget refresh ===
+    -- When multiple items arrive rapidly (AP sync), only schedule
+    -- one deferred refresh instead of stacking dozens of LoopAsync
+    -- callbacks that all try to read the TMap simultaneously.
+    if _uiRefreshPending then
+        Logging.LogDebug("  UI refresh already pending, skipping duplicate")
+        return
+    end
+    _uiRefreshPending = true
+
+    -- Wait 500ms for TMap mutations to settle, then refresh on
+    -- the game thread so the engine is in a stable frame state.
+    LoopAsync(500, function()
+        _uiRefreshPending = false
+
+        ExecuteInGameThread(function()
+            pcall(function()
+                local hudActors = FindAllOf("BP_TalosHUD_C")
+                if not hudActors then
+                    Logging.LogDebug("  No BP_TalosHUD_C actors found")
+                    return
+                end
+
+                for _, hudActor in ipairs(hudActors) do
+                    if not hudActor or not hudActor:IsValid() then goto nextHud end
+
+                    local widget = nil
+                    pcall(function() widget = hudActor.WidgetRoot end)
+                    if not widget then goto nextHud end
+
+                    local wValid = false
+                    pcall(function() wValid = widget:IsValid() end)
+                    if not wValid then goto nextHud end
+
+                    -- ArrangerInfo:UpdateInventory (counter refresh)
+                    pcall(function()
+                        if widget.ArrangerInfo then
+                            widget.ArrangerInfo:UpdateInventory()
+                            Logging.LogDebug("  ArrangerInfo:UpdateInventory() called")
+                        end
+                    end)
+
+                    -- UpdateExplorationMode (HUD overlay refresh)
+                    local ok, err = pcall(function()
+                        widget:UpdateExplorationMode()
+                        Logging.LogDebug("  UpdateExplorationMode() called successfully")
+                    end)
+                    if not ok then
+                        Logging.LogDebug("  UpdateExplorationMode() error: " .. tostring(err))
+                    end
+
+                    ::nextHud::
+                end
+            end)
+        end)
+
+        return true -- run once
+    end)
 end
 
 -- Grant an item — Archipelago says the player owns this.

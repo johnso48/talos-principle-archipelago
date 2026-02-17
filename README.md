@@ -19,6 +19,14 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
 1. **Install UE4SS**:
    - Download [UE4SS experimental-latest](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest). Ensure it is not the zDEV version
    - Extract the contents of the zip folder to `Talos1/Binaries/Win64`
+   - Set the following settings within the UE4SS-settings.ini to 0
+      - HookProcessInternal
+      - HookProcessLocalScriptFunction
+      - HookInitGameState
+      - HookLoadMap
+      - HookCallFunctionByNameWithArguments
+      - HookBeginPlay
+      - HookEndPlay
    - **Note**: The experimental-latest version is required for Unreal Engine 5.4 support
    - **Note**: You may wish to enable the console output to verify it is working. Modify the UE4SS-settings.ini within UE4SS file
                and set ConsoleEnabled to 1

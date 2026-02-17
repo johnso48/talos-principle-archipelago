@@ -20,8 +20,32 @@
 -- ============================================================
 
 local Logging = require("lib.logging")
+local Collection = require("lib.collection")
 
 local M = {}
+
+local TRANSCENDENCE_SIGIL_REQUIREMENT = 90
+
+-- Count sigils currently granted by Archipelago
+local function GetGrantedSigilCount()
+    local count = 0
+    local granted = Collection.GetGrantedItems()
+    if type(granted) == "table" then
+        for _ in pairs(granted) do
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Check if the player has enough sigils for Transcendence
+local function HasEnoughSigils()
+    local count = GetGrantedSigilCount()
+    if count < TRANSCENDENCE_SIGIL_REQUIREMENT then
+        return false
+    end
+    return true
+end
 
 -- Goal state tracking
 M.GoalCompleted = false
@@ -44,6 +68,7 @@ function M.RegisterHooks()
     local transcendenceHooked = pcall(function()
         RegisterHook("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence_DirectorBP_C:SequenceEvent_0", function(Context)
             if M.GoalCompleted then return end
+            if not HasEnoughSigils() then return end
             
             Logging.LogInfo("======================================")
             Logging.LogInfo("GOAL: TRANSCENDENCE ACHIEVED!")
@@ -76,6 +101,7 @@ function M.RegisterHooks()
     local notifyHooked = pcall(function()
         NotifyOnNewObject("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence_DirectorBP_C", function(createdObject)
             if M.GoalCompleted then return end
+            if not HasEnoughSigils() then return end
             Logging.LogInfo("[Goal] Ending_Transcendence_DirectorBP_C constructed — ending is loading")
             M._FireGoal("Transcendence", "NotifyOnNewObject — Ending_Transcendence_DirectorBP_C")
         end)
@@ -266,7 +292,7 @@ function M.CheckGoals(state)
     if M._transcendenceHookFailed then
         pcall(function()
             local seq = StaticFindObject("/Game/Cinematics/Sequences/Endings/Ending_Transcendence.Ending_Transcendence")
-            if seq and seq:IsValid() then
+            if seq and seq:IsValid() and HasEnoughSigils() then
                 M._FireGoal("Transcendence", "Polling — Ending_Transcendence LevelSequence found in memory")
                 return
             end
