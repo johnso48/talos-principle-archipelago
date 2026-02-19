@@ -223,7 +223,7 @@ end)
 pcall(function()
     RegisterHook("/Script/Talos.TalosGameInstance:OpenLevel", function(Context)
         Logging.LogInfo("OpenLevel called — pausing all loops for level transition")
-        State.LevelTransitionCooldown = 100  -- 10 seconds (100 * 100ms)
+        State.LevelTransitionCooldown = 100
         State.CurrentProgress = nil
         State.TrackedItems = {}
         VisibilityApplied = {}
@@ -428,105 +428,6 @@ LoopAsync(5, function()
 
     return false
 end)
-
--- ============================================================
--- Rain suppression loop — disable weather particles if configured
--- The UDW (Ultra Dynamic Weather) rain system uses Niagara particles
--- that can cause visual flickering with DLSS temporal accumulation.
--- ============================================================
-if Config.disable_rain then
-    Logging.LogInfo("Rain suppression enabled — weather particles will be disabled")
-    local rainSuppressCount = 0
-    LoopAsync(1000, function()
-        rainSuppressCount = rainSuppressCount + 1
-        local rainFound, snowFound = 0, 0
-
-        -- Suppress rain
-        pcall(function()
-            local rainActors = FindAllOf("UDW_Rain_C")
-            if rainActors then
-                rainFound = #rainActors
-                for _, rain in ipairs(rainActors) do
-                    if rain and rain:IsValid() then
-                        local ok1, e1 = pcall(function() rain:SetActorHiddenInGame(true) end)
-                        local ok2, e2 = pcall(function() rain:SetActorTickEnabled(false) end)
-                        local ok3, e3 = pcall(function() rain.RainSpawnRate = 0 end)
-                        local ok4, e4 = pcall(function() rain["Splash Frequency"] = 0 end)
-                        local ok5, e5 = pcall(function() rain["Enable Fog Particles"] = false end)
-                        local ok6, e6 = pcall(function() rain["Fog Particles Active"] = false end)
-                        local ok7, e7 = pcall(function()
-                            if rain["Rain Particles"] and rain["Rain Particles"]:IsValid() then
-                                rain["Rain Particles"]:Deactivate()
-                                rain["Rain Particles"]:SetVisibility(false, true)
-                            end
-                        end)
-                        -- Log failures on first tick
-                        if rainSuppressCount <= 2 then
-                            Logging.LogInfo(string.format(
-                                "Rain suppress results: Hidden=%s(%s) Tick=%s(%s) Spawn=%s(%s) Splash=%s(%s) Fog=%s(%s) FogAct=%s(%s) Niagara=%s(%s)",
-                                tostring(ok1), tostring(e1), tostring(ok2), tostring(e2),
-                                tostring(ok3), tostring(e3), tostring(ok4), tostring(e4),
-                                tostring(ok5), tostring(e5), tostring(ok6), tostring(e6),
-                                tostring(ok7), tostring(e7)))
-                            -- Also verify if properties actually changed
-                            pcall(function()
-                                Logging.LogInfo(string.format(
-                                    "Rain verify: bHidden=%s RainSpawnRate=%s SplashFreq=%s EnableFog=%s FogActive=%s",
-                                    tostring(rain.bHidden),
-                                    tostring(rain.RainSpawnRate),
-                                    tostring(rain["Splash Frequency"]),
-                                    tostring(rain["Enable Fog Particles"]),
-                                    tostring(rain["Fog Particles Active"])))
-                            end)
-                            pcall(function()
-                                local rp = rain["Rain Particles"]
-                                if rp and rp:IsValid() then
-                                    Logging.LogInfo(string.format(
-                                        "Rain Niagara: IsActive=%s bVisible=%s",
-                                        tostring(rp:IsActive()), tostring(rp:IsVisible())))
-                                else
-                                    Logging.LogInfo("Rain Niagara: component nil or invalid")
-                                end
-                            end)
-                        end
-                    end
-                end
-            end
-        end)
-
-        -- Suppress snow
-        pcall(function()
-            local snowActors = FindAllOf("UDW_Snow_C")
-            if snowActors then
-                snowFound = #snowActors
-                for _, snow in ipairs(snowActors) do
-                    if snow and snow:IsValid() then
-                        pcall(function() snow:SetActorHiddenInGame(true) end)
-                        pcall(function() snow:SetActorTickEnabled(false) end)
-                        pcall(function() snow.RainSpawnRate = 0 end)
-                        pcall(function() snow["Splash Frequency"] = 0 end)
-                        pcall(function() snow["Enable Fog Particles"] = false end)
-                        pcall(function() snow["Fog Particles Active"] = false end)
-                        pcall(function()
-                            if snow["Rain Particles"] and snow["Rain Particles"]:IsValid() then
-                                snow["Rain Particles"]:Deactivate()
-                                snow["Rain Particles"]:SetVisibility(false, true)
-                            end
-                        end)
-                    end
-                end
-            end
-        end)
-
-        -- Log diagnostics periodically (every 30s)
-        if rainSuppressCount % 30 == 1 then
-            Logging.LogDebug(string.format("Rain suppression tick %d: rain=%d snow=%d actors found",
-                rainSuppressCount, rainFound, snowFound))
-        end
-
-        return false -- keep running
-    end)
-end
 
 -- ============================================================
 -- Debug keybinds

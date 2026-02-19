@@ -51,6 +51,28 @@ local AP_ITEM_IDS = {
     [0x540012] = "NS",  -- Red S
 }
 
+local PREFIX_DISPLAY_NAMES = {
+    DJ = "Green J",
+    DZ = "Green Z",
+    DI = "Green I",
+    DL = "Green L",
+    DT = "Green T",
+    MT = "Golden T",
+    ML = "Golden L",
+    MZ = "Golden Z",
+    MS = "Golden S",
+    MJ = "Golden J",
+    MO = "Golden O",
+    MI = "Golden I",
+    NL = "Red L",
+    NZ = "Red Z",
+    NT = "Red T",
+    NI = "Red I",
+    NJ = "Red J",
+    NO = "Red O",
+    NS = "Red S",
+}
+
 -- ============================================================
 -- All tetrominoes in the game (from BotPuzzleDatabase.csv)
 -- ============================================================
@@ -222,6 +244,20 @@ end
 --- @return string|nil The prefix (e.g. "DJ", "MT") or nil if unknown
 function M.GetItemPrefix(apItemId)
     return AP_ITEM_IDS[apItemId]
+end
+
+--- Get the human-readable display name for an AP item ID or tetromino ID.
+function M.GetDisplayName(apItemIdOrTetromino)
+    local prefix
+    if type(apItemIdOrTetromino) == "number" then
+        prefix = AP_ITEM_IDS[apItemIdOrTetromino]
+    elseif type(apItemIdOrTetromino) == "string" then
+        prefix = apItemIdOrTetromino:match("^(%a+)")
+    end
+    if prefix then
+        return PREFIX_DISPLAY_NAMES[prefix]
+    end
+    return nil
 end
 
 --- Resolve the next concrete tetromino for a received AP item.

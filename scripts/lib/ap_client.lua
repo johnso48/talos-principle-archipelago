@@ -224,11 +224,22 @@ local function OnItemsReceived(items)
                 grantedCount = grantedCount + 1
             end
 
-            -- Show on-screen notification
+            -- Show on-screen notification with colored segments
             local senderName = GetPlayerName(item.player)
             local isSelf = (item.player == M.PlayerSlot)
             if not isSelf then
-                HUD.ShowMessage(string.format("%s sent you %s", senderName, tetId))
+                local displayName = ItemMapping.GetDisplayName(item.item) or tetId
+                local flags = item.flags or 0
+                local itemColor = HUD.COLORS.ITEM
+                if flags & 4 ~= 0 then     itemColor = HUD.COLORS.TRAP
+                elseif flags & 1 ~= 0 then itemColor = HUD.COLORS.PROGRESSION
+                elseif flags & 2 ~= 0 then itemColor = HUD.COLORS.USEFUL
+                end
+                HUD.ShowMessage({
+                    {text = senderName,    color = HUD.COLORS.PLAYER},
+                    {text = " sent you ", color = HUD.COLORS.WHITE},
+                    {text = displayName,   color = itemColor},
+                })
             end
         else
             local prefix = ItemMapping.GetItemPrefix(item.item)
@@ -256,14 +267,101 @@ local function OnLocationChecked(locations)
     Logging.LogDebug(string.format("AP: Server confirmed %d location checks", #locations))
 end
 
+--- Determine the HUD color for an item based on its classification flags.
+local function ItemColorFromFlags(flags)
+    flags = flags or 0
+    if flags & 4 ~= 0 then return HUD.COLORS.TRAP end
+    if flags & 1 ~= 0 then return HUD.COLORS.PROGRESSION end
+    if flags & 2 ~= 0 then return HUD.COLORS.USEFUL end
+    return HUD.COLORS.ITEM
+end
+
+--- Try to build an array of colored segments from the raw AP message parts.
+--- Uses render_json on each individual part so the library resolves all IDs
+--- (including cross-game items), while we determine the color from part type.
+--- Returns nil on failure (caller should fall back to render_json on the whole msg).
+local function BuildColoredSegments(msg)
+    if type(msg) ~= "table" or #msg == 0 then return nil end
+
+    local segs = {}
+    for _, part in ipairs(msg) do
+        local ptype = part.type or "text"
+        local color = HUD.COLORS.WHITE
+
+        -- Determine color from part type
+        if ptype == "player_id" or ptype == "player_name" then
+            color = HUD.COLORS.PLAYER
+        elseif ptype == "item_id" or ptype == "item_name" then
+            color = ItemColorFromFlags(part.flags)
+        elseif ptype == "location_id" or ptype == "location_name" then
+            color = HUD.COLORS.LOCATION
+        elseif ptype == "entrance_name" then
+            color = HUD.COLORS.ENTRANCE
+        end
+
+        -- Render this single part via the library so it resolves IDs properly
+        local text = nil
+        pcall(function()
+            text = ap:render_json({part}, AP.RenderFormat.TEXT)
+        end)
+
+        -- Fallback: use the raw text field
+        if not text or text == "" then
+            text = tostring(part.text or "")
+        end
+
+        if text ~= "" then
+            table.insert(segs, {text = text, color = color})
+        end
+    end
+
+    return #segs > 0 and segs or nil
+end
+
+-- Deduplication: track recently shown messages to prevent spam.
+-- Key = plain text, value = tickCount when it was last shown.
+local recentMessages = {}
+local DEDUP_WINDOW   = 5   -- seconds; ignore identical messages within this window
+
 local function OnPrintJson(msg, extra)
-    if ap then
+    if not ap then return end
+
+    -- Try colored segments from raw message parts
+    local segments = nil
+    pcall(function() segments = BuildColoredSegments(msg) end)
+
+    -- Fallback: render as plain white text via the library
+    if not segments then
         local text = ap:render_json(msg, AP.RenderFormat.TEXT)
         if text and text ~= "" then
-            Logging.LogInfo("AP: " .. text)
-            -- Show server chat / hint messages on screen
-            HUD.ShowMessage(text, 6000)
+            segments = { {text = text, color = HUD.COLORS.WHITE} }
         end
+    end
+
+    if segments then
+        local plain = ""
+        for _, s in ipairs(segments) do plain = plain .. s.text end
+
+        -- Deduplicate: skip if we showed the exact same text recently
+        local now = os.clock()
+        local lastSeen = recentMessages[plain]
+        if lastSeen and (now - lastSeen) < DEDUP_WINDOW then
+            Logging.LogDebug("AP: Suppressed duplicate: " .. plain)
+            return
+        end
+        recentMessages[plain] = now
+
+        -- Periodic cleanup of the dedup cache (keep it small)
+        local staleKeys = {}
+        for k, t in pairs(recentMessages) do
+            if (now - t) >= DEDUP_WINDOW * 2 then
+                table.insert(staleKeys, k)
+            end
+        end
+        for _, k in ipairs(staleKeys) do recentMessages[k] = nil end
+
+        Logging.LogInfo("AP: " .. plain)
+        HUD.ShowMessage(segments, 10000)
     end
 end
 
