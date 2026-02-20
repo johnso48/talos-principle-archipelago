@@ -41,7 +41,9 @@ local State = {
     ArrangerActive = false,  -- true while player is using an arranger/gate
     NeedsProgressRefresh = true,  -- deferred flag: find progress on next loop iteration
     NeedsHUDInit = true,          -- deferred flag: init HUD on next loop iteration
-    NeedsTetrominoScan = true     -- deferred flag: snapshot tetromino positions on next safe tick
+    NeedsTetrominoScan = true,    -- deferred flag: snapshot tetromino positions on next safe tick
+    CachedActorPaths = {},        -- set of actor paths (keys) for cache rebuild retries
+    CacheRetryCountdown = 0       -- ticks until next cache rebuild attempt (0 = no retry pending)
 }
 
 -- External callback for Archipelago integration
@@ -143,21 +145,23 @@ end
 -- ============================================================
 -- Hook player spawn - this is when we should refresh progress
 -- ============================================================
-RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
-    Logging.LogDebug("Player spawned - setting deferred refresh flags")
+-- RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
+--     Logging.LogDebug("Player spawned - setting deferred refresh flags")
     
-    -- Do NOT access UObjects synchronously in this hook.
-    -- During save loading, UObjects may be partially initialized and
-    -- UE4SS crashes in its own error handling if an access fails.
-    -- Instead: set flags and let the 100ms loop handle it safely
-    -- after the cooldown expires.
-    State.CurrentProgress = nil
-    State.TrackedItems = {}
-    State.LevelTransitionCooldown = 15
-    State.NeedsProgressRefresh = true
-    State.NeedsHUDInit = true
-    State.NeedsTetrominoScan = true
-end)
+--     -- Do NOT access UObjects synchronously in this hook.
+--     -- During save loading, UObjects may be partially initialized and
+--     -- UE4SS crashes in its own error handling if an access fails.
+--     -- Instead: set flags and let the 100ms loop handle it safely
+--     -- after the cooldown expires.
+--     State.CurrentProgress = nil
+--     State.TrackedItems = {}
+--     State.LevelTransitionCooldown = 15
+--     State.NeedsProgressRefresh = true
+--     State.NeedsHUDInit = true
+--     State.NeedsTetrominoScan = true
+--     Collection.ResetRemovalCache()
+--     Visibility.ResetDiagnostics()
+-- end)
 
 -- ============================================================
 -- Hook save game set — fires when the game instance receives
@@ -172,8 +176,12 @@ RegisterHook("/Script/Talos.TalosGameInstance:SetTalosSaveGameInstance", functio
     State.CurrentProgress = nil
     State.TrackedItems = {}
     State.CollectedThisSession = {}
+    State.CachedActorPaths = {}
+    State.CacheRetryCountdown = 0
     State.NeedsProgressRefresh = true
     State.NeedsTetrominoScan = true
+    Collection.ResetRemovalCache()
+    Visibility.ResetDiagnostics()
     GoalDetection.ResetGoalState()
 end)
 
@@ -184,9 +192,13 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
     Logging.LogInfo("ReloadSaveGame called — will re-acquire progress on player spawn")
     State.CurrentProgress = nil
     State.TrackedItems = {}
+    State.CachedActorPaths = {}
+    State.CacheRetryCountdown = 0
     State.LevelTransitionCooldown = 20
     State.NeedsProgressRefresh = true
     State.NeedsTetrominoScan = true
+    Collection.ResetRemovalCache()
+    Visibility.ResetDiagnostics()
     GoalDetection.ResetGoalState()
 end)
 
@@ -204,6 +216,10 @@ pcall(function()
         State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
+        State.CachedActorPaths = {}
+        State.CacheRetryCountdown = 0
+        Collection.ResetRemovalCache()
+        Visibility.ResetDiagnostics()
     end)
 end)
 
@@ -213,6 +229,10 @@ pcall(function()
         State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
+        State.CachedActorPaths = {}
+        State.CacheRetryCountdown = 0
+        Collection.ResetRemovalCache()
+        Visibility.ResetDiagnostics()
     end)
 end)
 
@@ -324,31 +344,51 @@ LoopAsync(100, function()
         pcall(function()
             local items = FindAllOf("BP_TetrominoItem_C")
             if items then
+                -- Phase 1: Extract actor paths and build SceneComponent cache.
+                -- This uses GetFullName() (safe on Angelscript actors) to find
+                -- each actor's Root SceneComponent by string path matching.
+                -- All subsequent visibility ops use the cached native components.
+                local actorPaths = {}
+                for _, item in ipairs(items) do
+                    pcall(function()
+                        if item:IsValid() then
+                            local path = Visibility.ExtractActorPath(item)
+                            if path then actorPaths[path] = true end
+                        end
+                    end)
+                end
+                Visibility.BuildComponentCache(actorPaths, true)  -- full rebuild on first scan
+                State.CachedActorPaths = actorPaths
+
+                -- Phase 2: Identify each tetromino and cache positions.
                 local count = 0
                 for _, item in ipairs(items) do
                     if item and item:IsValid() then
                         local tetrominoId = TetrominoUtils.GetTetrominoId(item)
                         if tetrominoId then
-                            local ix, iy, iz = nil, nil, nil
-                            pcall(function()
-                                local loc = item.Root.RelativeLocation
-                                ix = loc.X
-                                iy = loc.Y
-                                iz = loc.Z
-                            end)
+                            local actorPath = Visibility.ExtractActorPath(item)
+                            -- Read position from cached Root SceneComponent (SAFE — native type).
+                            -- Replaces unsafe item.Root.RelativeLocation access.
+                            local ix, iy, iz = Visibility.GetPositionFromCache(actorPath)
                             local addr = tostring(item:GetAddress())
-                            -- Apply initial visibility state
+
+                            -- CRITICAL: Remove from CollectedTetrominos BEFORE
+                            -- trying to make the item visible. The game hides
+                            -- items at BeginPlay if they're in the TMap, and may
+                            -- re-hide on Tick. Must remove first so visibility
+                            -- enforcement cooperates with the game's own logic.
                             local visRetries = 0
                             if Collection.ShouldBeCollectable(tetrominoId) then
-                                Visibility.SetTetrominoVisible(item)
+                                Visibility.SetTetrominoVisible(actorPath)
                                 visRetries = 30  -- keep retrying for ~3s
                             elseif Collection.IsLocationChecked(tetrominoId) and not Collection.IsGranted(tetrominoId) then
-                                Visibility.SetTetrominoHidden(item)
+                                Visibility.SetTetrominoHidden(actorPath)
                             end
 
                             State.TrackedItems[addr] = {
                                 id = tetrominoId,
                                 item = item,
+                                actorPath = actorPath,
                                 x = ix,
                                 y = iy,
                                 z = iz,
@@ -365,7 +405,141 @@ LoopAsync(100, function()
                         tostring(info.id),
                         info.x or 0, info.y or 0, info.z or 0))
                 end
+
+                -- Check if cache is complete; if not, schedule retries
+                local cached, total = Visibility.GetCacheStats(actorPaths)
+                if cached < total then
+                    State.CacheRetryCountdown = 5  -- retry in 500ms
+                    Logging.LogInfo(string.format(
+                        "Visibility cache incomplete (%d/%d) — will retry", cached, total))
+                end
             end
+        end)
+    end
+
+    -- ============================================================
+    -- Retry component cache build if initial scan was incomplete.
+    -- SceneComponents may not be registered yet during early ticks
+    -- after level load. Keep retrying every ~1s until fully cached,
+    -- up to ~10 seconds total.
+    -- ============================================================
+    if State.CacheRetryCountdown > 0 then
+        State.CacheRetryCountdown = State.CacheRetryCountdown - 1
+        if State.CacheRetryCountdown == 0 then
+            local pathCount = 0
+            for _ in pairs(State.CachedActorPaths) do pathCount = pathCount + 1 end
+            if pathCount > 0 then
+                pcall(function()
+                    Visibility.BuildComponentCache(State.CachedActorPaths)
+                    local cached, total = Visibility.GetCacheStats(State.CachedActorPaths)
+                    if cached < total then
+                        -- Still incomplete — retry again (up to ~10s = 100 ticks)
+                        State.CacheRetryCountdown = 10  -- retry in 1s
+                        Logging.LogDebug(string.format(
+                            "Visibility cache still incomplete (%d/%d) — retrying", cached, total))
+                    else
+                        Logging.LogInfo(string.format(
+                            "Visibility cache now complete (%d/%d)", cached, total))
+                        -- Re-read positions for items that had nil coordinates
+                        for addr, info in pairs(State.TrackedItems) do
+                            if info.actorPath and (not info.x) then
+                                local ix, iy, iz = Visibility.GetPositionFromCache(info.actorPath)
+                                if ix then
+                                    info.x = ix
+                                    info.y = iy
+                                    info.z = iz
+                                    Logging.LogInfo(string.format(
+                                        "  Late position: %s @ (%.1f, %.1f, %.1f)",
+                                        tostring(info.id), ix, iy, iz))
+                                end
+                            end
+                        end
+                        -- Re-apply initial visibility now that cache is ready
+                        for addr, info in pairs(State.TrackedItems) do
+                            if info.actorPath then
+                                pcall(function()
+                                    if Collection.ShouldBeCollectable(info.id) then
+                                        Visibility.SetTetrominoVisible(info.actorPath)
+                                        info.visRetries = 30
+                                    elseif Collection.IsLocationChecked(info.id) and not Collection.IsGranted(info.id) then
+                                        Visibility.SetTetrominoHidden(info.actorPath)
+                                    end
+                                end)
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end
+
+    -- ============================================================
+    -- Periodic visibility refresh (every 3 seconds).
+    -- Checkpoint reloads and game-internal respawns may not fire
+    -- any of our hooks, leaving the SceneComponent cache stale.
+    -- Every 30 ticks (~3s) we re-discover actors, rebuild the
+    -- cache, and re-apply visibility. This is lightweight: the
+    -- additive BuildComponentCache skips already-cached paths.
+    -- ============================================================
+    local VISIBILITY_REFRESH_INTERVAL = 30  -- ticks (30 * 100ms = 3s)
+    if LoopCount % VISIBILITY_REFRESH_INTERVAL == 0 then
+        pcall(function()
+            local items = FindAllOf("BP_TetrominoItem_C")
+            if not items then return end
+
+            -- Rebuild actor path set and component cache
+            local actorPaths = {}
+            for _, item in ipairs(items) do
+                pcall(function()
+                    if item:IsValid() then
+                        local path = Visibility.ExtractActorPath(item)
+                        if path then actorPaths[path] = true end
+                    end
+                end)
+            end
+            Visibility.BuildComponentCache(actorPaths)
+            State.CachedActorPaths = actorPaths
+
+            -- Re-discover tracked items (handles checkpoint reload where
+            -- old UObject addresses are invalid and new actors spawned)
+            local newTracked = {}
+            local refreshed = 0
+            for _, item in ipairs(items) do
+                if item and item:IsValid() then
+                    local tetrominoId = TetrominoUtils.GetTetrominoId(item)
+                    if tetrominoId then
+                        local actorPath = Visibility.ExtractActorPath(item)
+                        local addr = tostring(item:GetAddress())
+                        local ix, iy, iz = Visibility.GetPositionFromCache(actorPath)
+
+                        -- Preserve existing tracking state if same address still alive
+                        local existing = State.TrackedItems[addr]
+                        local reported = existing and existing.reported or false
+                        local visRetries = 0
+
+                        -- Apply visibility
+                        if Collection.ShouldBeCollectable(tetrominoId) then
+                            Visibility.SetTetrominoVisible(actorPath)
+                            visRetries = 10  -- ~1s of retries
+                        elseif Collection.IsLocationChecked(tetrominoId) and not Collection.IsGranted(tetrominoId) then
+                            Visibility.SetTetrominoHidden(actorPath)
+                        end
+
+                        newTracked[addr] = {
+                            id = tetrominoId,
+                            item = item,
+                            actorPath = actorPath,
+                            x = ix or (existing and existing.x),
+                            y = iy or (existing and existing.y),
+                            z = iz or (existing and existing.z),
+                            reported = reported,
+                            visRetries = visRetries
+                        }
+                        refreshed = refreshed + 1
+                    end
+                end
+            end
+            State.TrackedItems = newTracked
         end)
     end
 
@@ -425,24 +599,16 @@ LoopAsync(100, function()
                         if itemValid then
                             -- Visibility enforcement
                             if Collection.ShouldBeCollectable(info.id) then
-                                local needsRestore = false
-                                pcall(function()
-                                    if info.item.bHidden == true then
-                                        needsRestore = true
-                                    elseif info.item.TetrominoMesh and info.item.TetrominoMesh:IsValid() then
-                                        if info.item.TetrominoMesh.bVisible == false then
-                                            needsRestore = true
-                                        elseif info.item.TetrominoMesh.bHiddenInGame == true then
-                                            needsRestore = true
-                                        end
-                                    end
-                                end)
+                                -- Check if game re-hid the item using cached
+                                -- Root SceneComponent (SAFE — native engine type).
+                                -- Replaces unsafe info.item.bHidden / info.item.TetrominoMesh checks.
+                                local isHidden = Visibility.IsHiddenByPath(info.actorPath)
                                 local VISIBILITY_RETRY_COUNT = 30  -- ~3 seconds at 100ms
-                                if needsRestore then
+                                if isHidden then
                                     info.visRetries = VISIBILITY_RETRY_COUNT
                                 end
                                 if info.visRetries > 0 then
-                                    Visibility.SetTetrominoVisible(info.item)
+                                    Visibility.SetTetrominoVisible(info.actorPath)
                                     info.visRetries = info.visRetries - 1
                                 end
 
@@ -458,13 +624,13 @@ LoopAsync(100, function()
                                             "Proximity pickup: %s (dist=%.0f)",
                                             info.id, math.sqrt(distSq)))
                                         info.reported = true
-                                        Visibility.SetTetrominoHidden(info.item)
+                                        Visibility.SetTetrominoHidden(info.actorPath)
                                         OnTetrominoCollected(info.id)
                                     end
                                 end
                             elseif Collection.IsLocationChecked(info.id) and not Collection.IsGranted(info.id) then
                                 -- Checked-but-not-granted → hide (sent to another player)
-                                Visibility.SetTetrominoHidden(info.item)
+                                Visibility.SetTetrominoHidden(info.actorPath)
                             end
                         end
                     end
@@ -542,18 +708,31 @@ RegisterKeyBind(Key.F7, function()
         return
     end
 
+    -- Build fresh SceneComponent cache for visibility ops
+    local actorPaths = {}
+    for _, item in ipairs(items) do
+        pcall(function()
+            if item:IsValid() then
+                local path = Visibility.ExtractActorPath(item)
+                if path then actorPaths[path] = true end
+            end
+        end)
+    end
+    Visibility.BuildComponentCache(actorPaths)
+
     local madeVisible, hidden, skipped = 0, 0, 0
     for _, item in ipairs(items) do
         if item and item:IsValid() then
             local id = TetrominoUtils.GetTetrominoId(item)
             if id then
+                local actorPath = Visibility.ExtractActorPath(item)
                 if Collection.ShouldBeCollectable(id) then
-                    -- Make the item visible — do NOT touch the TMap
-                    Visibility.SetTetrominoVisible(item)
+                    -- Remove from TMap FIRST so the game doesn't fight us
+                    Visibility.SetTetrominoVisible(actorPath)
                     madeVisible = madeVisible + 1
-                    Logging.LogInfo(string.format("  [VISIBLE] %s", id))
+                    -- Logging.LogInfo(string.format("  [VISIBLE] %s (TMap removed=%s)", id, tostring(removed)))
                 elseif Collection.IsLocationChecked(id) and not Collection.IsGranted(id) then
-                    Visibility.SetTetrominoHidden(item)
+                    Visibility.SetTetrominoHidden(actorPath)
                     hidden = hidden + 1
                     Logging.LogInfo(string.format("  [HIDDEN]  %s (checked, not granted)", id))
                 else

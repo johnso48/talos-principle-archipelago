@@ -58,6 +58,7 @@ local canvasPanel = nil   -- the CanvasPanel (root of widget tree)
 local rowBoxes    = {}    -- [i] = HorizontalBox for row i (1..MAX_VISIBLE_LINES)
 local segBlocks   = {}    -- [i][j] = TextBlock for row i, segment j
 
+local enabled      = false -- when false, all public API calls are no-ops
 local messages     = {}   -- array of {segments={{text,color},...}, expireAt=number}
 local pendingQueue = {}   -- buffered messages waiting to be promoted
 local tickCount    = 0    -- monotonic counter incremented by TICK_INTERVAL
@@ -378,6 +379,7 @@ end
 --- Initialize or re-initialize the HUD widget.
 --- Safe to call multiple times (e.g. after level transitions).
 function M.Init()
+    if not enabled then return end
     widget      = nil
     vertBox     = nil
     canvasPanel = nil
@@ -429,6 +431,7 @@ end
 --- @param textOrSegments string|table  Plain string (white) OR array of {text=, color=}
 --- @param duration number|nil          Duration in ms (default 5000)
 function M.ShowMessage(textOrSegments, duration)
+    if not enabled then return end
     if not textOrSegments then return end
     duration = duration or DEFAULT_DURATION
 
@@ -462,6 +465,7 @@ end
 
 --- Remove all messages and clear the display.
 function M.Clear()
+    if not enabled then return end
     messages     = {}
     pendingQueue = {}
     displayDirty = true
@@ -479,6 +483,7 @@ end
 
 --- Tear down the widget entirely.
 function M.Shutdown()
+    if not enabled then return end
     M.Clear()
     ExecuteInGameThread(function()
         DestroyWidget()
@@ -487,7 +492,19 @@ end
 
 --- Check whether the widget is alive.
 function M.IsReady()
-    return widget ~= nil and not widgetCreationFailed
+    return enabled and widget ~= nil and not widgetCreationFailed
+end
+
+--- Enable or disable the HUD entirely.
+--- When disabled, all public API calls become no-ops.
+--- @param value boolean
+function M.SetEnabled(value)
+    enabled = value == true
+end
+
+--- Return whether the HUD is currently enabled.
+function M.IsEnabled()
+    return enabled
 end
 
 return M

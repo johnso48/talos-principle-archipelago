@@ -45,6 +45,80 @@ local function TMapAddPreserving(tmap, id)
 end
 
 -- ============================================================
+-- Game API removal via UPuzzleMemoryFunctions::RemoveTetrominoFromInventory
+-- This is the game's own C++ UFunction for removing a tetromino
+-- from the CollectedTetrominos TMap. More reliable than UE4SS's
+-- Lua TMap:Remove() which silently fails for TMap<FString, bool>.
+-- ============================================================
+
+-- Cache the CDO to avoid repeated StaticFindObject calls.
+local _puzzleMemoryFunctionsCDO = nil
+
+local function GetPuzzleMemoryFunctionsCDO()
+    if _puzzleMemoryFunctionsCDO then
+        local valid = false
+        pcall(function() valid = _puzzleMemoryFunctionsCDO:IsValid() end)
+        if valid then return _puzzleMemoryFunctionsCDO end
+    end
+    pcall(function()
+        _puzzleMemoryFunctionsCDO = StaticFindObject("/Script/Talos.Default__PuzzleMemoryFunctions")
+    end)
+    return _puzzleMemoryFunctionsCDO
+end
+
+-- Track items where removal has failed (no actor in level, etc.)
+-- Avoids retrying expensive FindAllOf every 100ms for items we can't fix.
+local _failedRemovals = {}  -- key → attempt count
+local MAX_REMOVAL_ATTEMPTS = 5
+
+-- Try all available strategies to remove a tetromino from CollectedTetrominos.
+-- Strategy 1: Game API (RemoveTetrominoFromInventory) — most reliable
+-- Strategy 2: Direct TMap:Remove — fallback (may not work in UE4SS)
+-- Returns true if the item is confirmed removed (or was never in the TMap).
+local function ForceRemoveFromTMap(progress, tetrominoId)
+    -- Check if it's even in the TMap
+    local inTMap = false
+    pcall(function()
+        local val = progress.CollectedTetrominos:Find(tetrominoId)
+        if val ~= nil then inTMap = true end
+    end)
+    if not inTMap then return true end  -- Already gone
+
+    -- Skip items that have failed too many times
+    if _failedRemovals[tetrominoId] and _failedRemovals[tetrominoId] >= MAX_REMOVAL_ATTEMPTS then
+        return false
+    end
+
+    local removeOk, removeErr = pcall(function()
+        progress.CollectedTetrominos:Remove(tetrominoId)
+    end)
+
+    -- Verify removal actually worked
+    local stillThere = false
+    pcall(function()
+        local val = progress.CollectedTetrominos:Find(tetrominoId)
+        if val ~= nil then stillThere = true end
+    end)
+
+    if not stillThere then
+        Logging.LogInfo(string.format("Removed '%s' from TMap via direct Remove", tetrominoId))
+        _failedRemovals[tetrominoId] = nil
+        return true
+    end
+
+    -- Both strategies failed
+    _failedRemovals[tetrominoId] = (_failedRemovals[tetrominoId] or 0) + 1
+    if _failedRemovals[tetrominoId] == 1 then
+        -- Only log on first failure to avoid spam
+        Logging.LogWarning(string.format(
+            "Cannot remove '%s' from TMap (game API: %s, TMap:Remove: %s)",
+            tetrominoId, tostring(apiErr),
+            removeOk and "no error but item persists" or tostring(removeErr)))
+    end
+    return false
+end
+
+-- ============================================================
 -- State
 -- ============================================================
 
@@ -101,16 +175,19 @@ function M.EnforceCollectionState(state)
         end)
     end)
 
-    -- Remove non-granted items from TMap
+    -- Remove non-granted items from TMap using game API + fallback.
+    -- ForceRemoveFromTMap uses RemoveTetrominoFromInventory (C++ UFunction)
+    -- as primary strategy, with direct TMap:Remove as fallback.
     if #toRemove > 0 then
+        local removed = 0
         for _, id in ipairs(toRemove) do
-            pcall(function()
-                if state.CurrentProgress and state.CurrentProgress:IsValid() then
-                    state.CurrentProgress.CollectedTetrominos:Remove(id)
-                end
-            end)
+            if ForceRemoveFromTMap(state.CurrentProgress, id) then
+                removed = removed + 1
+            end
         end
-        Logging.LogDebug(string.format("Enforced: removed %d non-granted items from TMap", #toRemove))
+        if removed > 0 then
+            Logging.LogInfo(string.format("Enforced: removed %d/%d non-granted items from TMap", removed, #toRemove))
+        end
     end
 
     -- Ensure all granted items are in TMap (usable in arrangers/doors).
@@ -365,6 +442,22 @@ end
 -- Get granted items table for goal detection
 function M.GetGrantedItems()
     return M.GrantedItems
+end
+
+-- Force-remove a tetromino from CollectedTetrominos TMap.
+-- Exposed for use in main.lua scan phase and F7 handler.
+function M.ForceRemoveFromTMap(state, tetrominoId)
+    if not state.CurrentProgress or not state.CurrentProgress:IsValid() then
+        return false
+    end
+    return ForceRemoveFromTMap(state.CurrentProgress, tetrominoId)
+end
+
+-- Reset the failed-removal cache. Call on level transition
+-- so items get another chance when new actors are loaded.
+function M.ResetRemovalCache()
+    _failedRemovals = {}
+    _puzzleMemoryFunctionsCDO = nil
 end
 
 return M
