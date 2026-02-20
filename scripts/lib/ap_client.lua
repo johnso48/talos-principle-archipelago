@@ -239,23 +239,26 @@ local function OnItemsReceived(items)
             if not isSelf then
                 local displayName = ItemMapping.GetDisplayName(item.item) or tetId
                 local flags = item.flags or 0
-                local itemColor = HUD.COLORS.ITEM
-                if flags & 4 ~= 0 then     itemColor = HUD.COLORS.TRAP
-                elseif flags & 1 ~= 0 then itemColor = HUD.COLORS.PROGRESSION
-                elseif flags & 2 ~= 0 then itemColor = HUD.COLORS.USEFUL
-                end
+                local itemColor = HUD.ColorForFlags(flags)
                 local notifText = senderName .. " sent you " .. displayName
                 Logging.LogInfo(string.format(
-                    "AP[ItemNotif]: showing HUD notification: '%s'", notifText))
-                HUD.ShowMessage({
-                    {text = senderName,    color = HUD.COLORS.PLAYER},
-                    {text = " sent you ", color = HUD.COLORS.WHITE},
-                    {text = displayName,   color = itemColor},
+                    "AP[ItemNotif]: notification: '%s'", notifText))
+                HUD.Notify({
+                    { text = senderName,    color = HUD.COLORS.PLAYER },
+                    { text = " sent you ", color = HUD.COLORS.WHITE  },
+                    { text = displayName,   color = itemColor          },
                 })
             else
+                -- Self-send: show a quieter "you found" notification
+                local displayName = ItemMapping.GetDisplayName(item.item) or tetId
+                local flags = item.flags or 0
+                local itemColor = HUD.ColorForFlags(flags)
+                HUD.Notify({
+                    { text = "You found ",  color = HUD.COLORS.WHITE },
+                    { text = displayName,   color = itemColor         },
+                })
                 Logging.LogInfo(string.format(
-                    "AP[ItemNotif]: SKIPPED (isSelf=true, player=%s == slot=%s)",
-                    tostring(item.player), tostring(M.PlayerSlot)))
+                    "AP[ItemNotif]: self-send notification shown for %s", displayName))
             end
         else
             local prefix = ItemMapping.GetItemPrefix(item.item)
@@ -283,57 +286,6 @@ local function OnLocationChecked(locations)
     Logging.LogDebug(string.format("AP: Server confirmed %d location checks", #locations))
 end
 
---- Determine the HUD color for an item based on its classification flags.
-local function ItemColorFromFlags(flags)
-    flags = flags or 0
-    if flags & 4 ~= 0 then return HUD.COLORS.TRAP end
-    if flags & 1 ~= 0 then return HUD.COLORS.PROGRESSION end
-    if flags & 2 ~= 0 then return HUD.COLORS.USEFUL end
-    return HUD.COLORS.ITEM
-end
-
---- Try to build an array of colored segments from the raw AP message parts.
---- Uses render_json on each individual part so the library resolves all IDs
---- (including cross-game items), while we determine the color from part type.
---- Returns nil on failure (caller should fall back to render_json on the whole msg).
-local function BuildColoredSegments(msg)
-    if type(msg) ~= "table" or #msg == 0 then return nil end
-
-    local segs = {}
-    for _, part in ipairs(msg) do
-        local ptype = part.type or "text"
-        local color = HUD.COLORS.WHITE
-
-        -- Determine color from part type
-        if ptype == "player_id" or ptype == "player_name" then
-            color = HUD.COLORS.PLAYER
-        elseif ptype == "item_id" or ptype == "item_name" then
-            color = ItemColorFromFlags(part.flags)
-        elseif ptype == "location_id" or ptype == "location_name" then
-            color = HUD.COLORS.LOCATION
-        elseif ptype == "entrance_name" then
-            color = HUD.COLORS.ENTRANCE
-        end
-
-        -- Render this single part via the library so it resolves IDs properly
-        local text = nil
-        pcall(function()
-            text = ap:render_json({part}, AP.RenderFormat.TEXT)
-        end)
-
-        -- Fallback: use the raw text field
-        if not text or text == "" then
-            text = tostring(part.text or "")
-        end
-
-        if text ~= "" then
-            table.insert(segs, {text = text, color = color})
-        end
-    end
-
-    return #segs > 0 and segs or nil
-end
-
 -- Messages that match any of these substrings are silently suppressed.
 -- These are noisy server-sent boilerplate messages that add no value in-game.
 local SUPPRESSED_SUBSTRINGS = {
@@ -349,77 +301,6 @@ local function IsSuppressed(plain)
     return false
 end
 
--- Deduplication: track recently shown messages to prevent spam.
--- Key = plain text, value = os.clock() when it was last shown.
--- NOTE: os.clock() is CPU time, not wall time. On Windows with low
--- Lua CPU usage the delta can be near-zero even after many real seconds.
--- We track both os.clock() and a call counter as diagnostics.
-local recentMessages    = {}
-local DEDUP_WINDOW      = 5   -- seconds (CPU time); may not work reliably — see logs
-
-local function OnPrintJson(msg, extra)
-    if not ap then return end
-    printJsonCallCount = printJsonCallCount + 1
-    local callId = printJsonCallCount
-
-    -- Try colored segments from raw message parts
-    local segments = nil
-    pcall(function() segments = BuildColoredSegments(msg) end)
-
-    -- Fallback: render as plain white text via the library
-    if not segments then
-        local text = ap:render_json(msg, AP.RenderFormat.TEXT)
-        if text and text ~= "" then
-            segments = { {text = text, color = HUD.COLORS.WHITE} }
-        end
-    end
-
-    if segments then
-        local plain = ""
-        for _, s in ipairs(segments) do plain = plain .. s.text end
-
-        -- Filter: drop known boilerplate messages before any further processing
-        local suppressed, matchedRule = IsSuppressed(plain)
-        if suppressed then
-            Logging.LogDebug(string.format(
-                "AP[PrintJson#%d]: suppressed by filter '%s'", callId, matchedRule))
-            return
-        end
-
-        -- Diagnostic: log every OnPrintJson invocation with timing info
-        local now = os.clock()
-        local lastSeen = recentMessages[plain]
-        local delta = lastSeen and (now - lastSeen) or -1
-        Logging.LogInfo(string.format(
-            "AP[PrintJson#%d]: plain='%s' os.clock()=%.6f lastSeen=%.6f delta=%.6f",
-            callId, plain:sub(1, 80), now, lastSeen or 0, delta))
-
-        -- Deduplicate: skip if we showed the exact same text recently
-        if lastSeen and delta < DEDUP_WINDOW then
-            Logging.LogInfo(string.format(
-                "AP[PrintJson#%d]: DEDUP HIT (delta=%.6f < window=%d) — suppressed",
-                callId, delta, DEDUP_WINDOW))
-            return
-        end
-        recentMessages[plain] = now
-
-        -- Periodic cleanup of the dedup cache (keep it small)
-        local staleKeys = {}
-        for k, t in pairs(recentMessages) do
-            if (now - t) >= DEDUP_WINDOW * 2 then
-                table.insert(staleKeys, k)
-            end
-        end
-        for _, k in ipairs(staleKeys) do recentMessages[k] = nil end
-
-        Logging.LogInfo(string.format("AP[PrintJson#%d]: passing to HUD.ShowMessage", callId))
-        Logging.LogInfo("AP: " .. plain)
-        HUD.ShowMessage(segments, 10000)
-    else
-        Logging.LogInfo(string.format("AP[PrintJson#%d]: no segments produced — skipped", callId))
-    end
-end
-
 local function OnBounced(bounce)
     -- Handle DeathLink or other bounced messages
     if bounce and bounce.tags then
@@ -430,6 +311,48 @@ local function OnBounced(bounce)
             end
         end
     end
+end
+
+local function OnPrintJson(msg, extra)
+    printJsonCallCount = printJsonCallCount + 1
+    if not msg then return end
+
+    -- Render the message parts into plain text using the AP client helper.
+    -- Each element in msg is a table with a "type" field ("text", "player_id",
+    -- "item_id", "location_id", etc.) and lua-apclientpp's render_json
+    -- resolves IDs to display names and concatenates everything.
+    local plain
+    if ap and ap.render_json then
+        local ok, result = pcall(function() return ap:render_json(msg) end)
+        if ok and result then
+            plain = result
+        end
+    end
+
+    -- Fallback: manually concatenate "text" fields
+    if not plain or plain == "" then
+        local parts = {}
+        for _, part in ipairs(msg) do
+            if type(part) == "table" and part.text then
+                table.insert(parts, part.text)
+            elseif type(part) == "string" then
+                table.insert(parts, part)
+            end
+        end
+        plain = table.concat(parts)
+    end
+
+    if plain == "" then return end
+
+    -- Check suppression list
+    local suppressed, reason = IsSuppressed(plain)
+    if suppressed then
+        Logging.LogDebug("AP: Suppressed PrintJson (" .. reason .. "): " .. plain)
+        return
+    end
+
+    Logging.LogInfo("AP[Chat]: " .. plain)
+    HUD.NotifySimple(plain, HUD.COLORS.WHITE)
 end
 
 -- ============================================================

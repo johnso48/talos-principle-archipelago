@@ -15,7 +15,6 @@ local ItemMapping = require("lib.item_mapping")
 local APClient = require("lib.ap_client")
 local GoalDetection = require("lib.goal_detection")
 local HUD = require("lib.hud")
-
 Logging.LogInfo("==============================================")
 Logging.LogInfo("Archipelago Mod Loading...")
 Logging.LogInfo("==============================================")
@@ -24,6 +23,11 @@ Logging.LogInfo("==============================================")
 -- Load configuration
 -- ============================================================
 Config.Load()
+
+-- ============================================================
+-- Initialize HUD notification system
+-- ============================================================
+HUD.Init()
 
 -- ============================================================
 -- Shared state
@@ -40,7 +44,6 @@ local State = {
     LastAddedTetrominoId = nil,
     ArrangerActive = false,  -- true while player is using an arranger/gate
     NeedsProgressRefresh = true,  -- deferred flag: find progress on next loop iteration
-    NeedsHUDInit = true,          -- deferred flag: init HUD on next loop iteration
     NeedsTetrominoScan = true,    -- deferred flag: snapshot tetromino positions on next safe tick
     CachedActorPaths = {},        -- set of actor paths (keys) for cache rebuild retries
     CacheRetryCountdown = 0       -- ticks until next cache rebuild attempt (0 = no retry pending)
@@ -102,13 +105,6 @@ end
 GoalDetection.RegisterHooks()
 
 -- ============================================================
--- Initialize HUD notification overlay
--- Deferred: actual UMG widget creation happens in the main loop
--- after the initial startup cooldown expires (State.NeedsHUDInit).
--- ============================================================
--- HUD.Init() called after cooldown — see NeedsHUDInit flag
-
--- ============================================================
 -- Handle tetromino physical pickup event (location checked)
 -- This fires when the player walks into a tetromino in-world.
 -- It does NOT mean the item is in their inventory — Archipelago
@@ -122,7 +118,6 @@ local function OnTetrominoCollected(tetrominoId)
     State.CollectedThisSession[tetrominoId] = true
     
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
-    -- but the HUD won't update until we explicitly tell it to.
     -- Guard: skip if a level transition started while we were waiting.
     LoopAsync(5000, function()
         if State.LevelTransitionCooldown <= 0 then
@@ -145,23 +140,22 @@ end
 -- ============================================================
 -- Hook player spawn - this is when we should refresh progress
 -- ============================================================
--- RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
---     Logging.LogDebug("Player spawned - setting deferred refresh flags")
+RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
+    Logging.LogDebug("Player spawned - setting deferred refresh flags")
     
---     -- Do NOT access UObjects synchronously in this hook.
---     -- During save loading, UObjects may be partially initialized and
---     -- UE4SS crashes in its own error handling if an access fails.
---     -- Instead: set flags and let the 100ms loop handle it safely
---     -- after the cooldown expires.
---     State.CurrentProgress = nil
---     State.TrackedItems = {}
---     State.LevelTransitionCooldown = 15
---     State.NeedsProgressRefresh = true
---     State.NeedsHUDInit = true
---     State.NeedsTetrominoScan = true
---     Collection.ResetRemovalCache()
---     Visibility.ResetDiagnostics()
--- end)
+    -- Do NOT access UObjects synchronously in this hook.
+    -- During save loading, UObjects may be partially initialized and
+    -- UE4SS crashes in its own error handling if an access fails.
+    -- Instead: set flags and let the 100ms loop handle it safely
+    -- after the cooldown expires.
+    State.CurrentProgress = nil
+    State.TrackedItems = {}
+    State.LevelTransitionCooldown = 15
+    State.NeedsProgressRefresh = true
+    State.NeedsTetrominoScan = true
+    Collection.ResetRemovalCache()
+    Visibility.ResetDiagnostics()
+end)
 
 -- ============================================================
 -- Hook save game set — fires when the game instance receives
@@ -322,13 +316,6 @@ LoopAsync(100, function()
                     timePlayed, tostring(level)))
                 Progress.DumpSaveFileContents(State)
             end
-        end)
-    end
-    if State.NeedsHUDInit then
-        State.NeedsHUDInit = false
-        pcall(function()
-            HUD.Init()
-            Logging.LogDebug("Deferred HUD init complete")
         end)
     end
 
@@ -799,6 +786,27 @@ RegisterKeyBind(Key.F8, function()
     end
     Logging.LogInfo("ALL gates + tools unlocked (through World C)")
     Collection.DumpState()
+end)
+
+-- F9: Test HUD notifications — fires one of each color type so you can
+-- verify positioning, shadow, fade-in/out and color accuracy in-game.
+RegisterKeyBind(Key.F9, function()
+    Logging.LogInfo("=== F9: HUD notification test ===")
+    HUD.Notify({
+        { text = "Alice",         color = HUD.COLORS.PLAYER },
+        { text = " sent you ",   color = HUD.COLORS.WHITE  },
+        { text = "Red L",         color = HUD.COLORS.TRAP   },
+    })
+    HUD.Notify({
+        { text = "Bob",           color = HUD.COLORS.PLAYER },
+        { text = " sent you ",   color = HUD.COLORS.WHITE  },
+        { text = "Golden T",      color = HUD.COLORS.PROGRESSION },
+    })
+    HUD.Notify({
+        { text = "You found ",   color = HUD.COLORS.WHITE  },
+        { text = "Green J",       color = HUD.COLORS.ITEM   },
+    })
+    HUD.NotifySimple("AP Connected to " .. (Config.server or "?"), HUD.COLORS.SERVER)
 end)
 
 -- ============================================================
