@@ -1,11 +1,31 @@
 -- ============================================================
 -- Tetromino visibility and collision management
 -- ============================================================
+--
+-- IMPORTANT: SetTetrominoVisible / SetTetrominoHidden are called
+-- from LoopAsync (worker thread). Angelscript-defined UFunctions
+-- like UnhideTetromino() / HideTetromino() CRASH on the worker
+-- thread due to a corrupted Activate TArray on tetromino actors.
+--
+-- Therefore these functions use ONLY:
+--   - SetActorHiddenInGame(bool) — C++ UFunction, safe from any thread
+--   - Direct property writes (bIsAnimating, Capsule collision)
+--
+-- UnhideTetrominoFull() uses the game's own UnhideTetromino() and
+-- is ONLY safe from the game thread (keybind handlers, hooks).
+-- ============================================================
 
 local Logging = require("lib.logging")
 
--- Force a tetromino item to be visible and have working collision/overlap.
--- Call this in a fast loop for items that should be collectable.
+-- Show a tetromino item (worker-thread safe).
+-- Uses SetActorHiddenInGame(false) + per-component visibility restore
+-- + Capsule collision restore.
+--
+-- IMPORTANT: SetActorHiddenInGame only sets the actor-level bHidden flag.
+-- The game's HideTetromino() also hides individual components (TetrominoMesh,
+-- Particles) via component-level flags (bVisible, bHiddenInGame).  We must
+-- restore those too, using the C++ UFunctions SetVisibility() and
+-- SetHiddenInGame() on USceneComponent, and Activate() on UActorComponent.
 local function SetTetrominoVisible(item)
     if not item or not item:IsValid() then 
         return false
@@ -13,82 +33,105 @@ local function SetTetrominoVisible(item)
     
     local success = false
     
-    -- Set actor-level visibility and collision
+    -- SetActorHiddenInGame is a C++ Engine UFunction — safe from LoopAsync.
+    -- It marks render state dirty so the actor actually appears on screen.
     pcall(function()
-        item.bHidden = false
-        item.bActorEnableCollision = true
+        item:SetActorHiddenInGame(false)
         success = true
     end)
     
-    -- Set mesh component visibility and collision
+    -- Restore component-level visibility on the skeletal mesh.
+    -- SetVisibility(bNewVisibility, bPropagateToChildren) and
+    -- SetHiddenInGame(NewHidden, bPropagateToChildren) are C++ UFunctions
+    -- on USceneComponent — safe from LoopAsync.
     pcall(function()
-        if item.TetrominoMesh then
-            item.TetrominoMesh.bVisible = true
-            item.TetrominoMesh.bHiddenInGame = false
-            item.TetrominoMesh.CollisionEnabled = 3
-            item.TetrominoMesh.bGenerateOverlapEvents = true
-            success = true
+        if item.TetrominoMesh and item.TetrominoMesh:IsValid() then
+            item.TetrominoMesh:SetVisibility(true, true)
+            item.TetrominoMesh:SetHiddenInGame(false, true)
         end
     end)
     
-    -- Set root component visibility and collision
+    -- Restore the Niagara particle system (the floating glow effect).
     pcall(function()
-        if item.Root then
-            item.Root.bHiddenInGame = false
-            item.Root.bVisible = true
-            item.Root.CollisionEnabled = 3
-            item.Root.bGenerateOverlapEvents = true
-            success = true
+        if item.Particles and item.Particles:IsValid() then
+            item.Particles:SetVisibility(true, false)
+            item.Particles:SetHiddenInGame(false, false)
+            -- Activate is a C++ UFunction on UActorComponent.
+            -- bReset=true restarts the particle effect from scratch.
+            item.Particles:Activate(true)
         end
     end)
     
-    -- CRITICAL: Enable the Capsule component collision.
-    -- The Capsule (UCapsuleComponent) is the actual overlap trigger that detects
-    -- the player walking into the tetromino. When HideTetromino() is called on
-    -- collection, it disables this component's collision, preventing re-pickup.
+    -- Clear stale animation state
+    pcall(function()
+        item.bIsAnimating = false
+    end)
+    
+    -- Enable the Capsule overlap trigger so the player can walk into the item.
     pcall(function()
         if item.Capsule and item.Capsule:IsValid() then
-            -- 1 = QueryOnly (sufficient for overlap detection)
-            -- bGenerateOverlapEvents must be true for OnBeginOverlap to fire
-            item.Capsule.CollisionEnabled = 1
+            item.Capsule.CollisionEnabled = 1  -- QueryOnly
             item.Capsule.bGenerateOverlapEvents = true
-            success = true
         end
     end)
     
     return success
 end
 
--- Force a tetromino item to be hidden with no collision.
--- Call this for items that have been checked or granted and should not be in-world.
+-- Hide a tetromino item (worker-thread safe).
+-- Uses SetActorHiddenInGame(true) + per-component visibility disable
+-- + Capsule collision disable.
 local function SetTetrominoHidden(item)
     if not item or not item:IsValid() then
         return false
     end
 
-    -- Let the game's own HideTetromino handle it cleanly
-    local ok = pcall(function()
-        item:HideTetromino()
+    local success = false
+
+    pcall(function()
+        item:SetActorHiddenInGame(true)
+        success = true
     end)
 
-    if not ok then
-        -- Fallback: manually hide
-        pcall(function()
-            item.bHidden = true
-        end)
-        pcall(function()
-            if item.Capsule and item.Capsule:IsValid() then
-                item.Capsule.CollisionEnabled = 0
-                item.Capsule.bGenerateOverlapEvents = false
-            end
-        end)
-    end
+    -- Hide individual components so they don't render even if bHidden
+    -- is later cleared by some other code path.
+    pcall(function()
+        if item.TetrominoMesh and item.TetrominoMesh:IsValid() then
+            item.TetrominoMesh:SetVisibility(false, true)
+            item.TetrominoMesh:SetHiddenInGame(true, true)
+        end
+    end)
+    
+    -- Deactivate particles so they stop emitting.
+    pcall(function()
+        if item.Particles and item.Particles:IsValid() then
+            item.Particles:SetVisibility(false, false)
+            item.Particles:SetHiddenInGame(true, false)
+            item.Particles:Deactivate()
+        end
+    end)
 
-    return true
+    -- Disable Capsule so the player can't re-trigger overlap
+    pcall(function()
+        if item.Capsule and item.Capsule:IsValid() then
+            item.Capsule.CollisionEnabled = 0  -- NoCollision
+            item.Capsule.bGenerateOverlapEvents = false
+        end
+    end)
+
+    return success
 end
 
--- Call the game's own UnhideTetromino() to properly restore all state.
--- Heavier than SetTetrominoVisible — use once per item, not in a tight loop.
+-- Full unhide using the game's own UnhideTetromino().
+-- ONLY call from game thread (keybind handlers, hooks) — NOT from LoopAsync.
+-- This properly restores particle systems and animation state that
+-- SetActorHiddenInGame alone cannot.
+--
+-- NOTE: UnhideTetromino() is an AngelScript UFunction. UE4SS often crashes
+-- calling it ("Array failed invariants check, ArrayNum exceeds ArrayMax")
+-- because it encounters the Activate TArray<ASkeletalMeshActor*> during
+-- reflection. The fallback SetTetrominoVisible() now handles per-component
+-- visibility so items will appear correctly even when UnhideTetromino fails.
 local function UnhideTetrominoFull(item)
     if not item or not item:IsValid() then
         return false
@@ -99,19 +142,14 @@ local function UnhideTetrominoFull(item)
     end)
     
     if not ok then
-        Logging.LogDebug(string.format("UnhideTetromino() call failed: %s", tostring(err)))
-        return SetTetrominoVisible(item)
+        Logging.LogDebug(string.format("UnhideTetromino() call failed (using component-level fallback): %s", tostring(err)))
     end
-    
-    -- Also ensure Capsule collision is enabled (UnhideTetromino may not do this)
-    pcall(function()
-        if item.Capsule and item.Capsule:IsValid() then
-            item.Capsule.CollisionEnabled = 1
-            item.Capsule.bGenerateOverlapEvents = true
-        end
-    end)
-    
-    return true
+
+    -- Always run the component-level visibility restore, even if
+    -- UnhideTetromino() succeeded, to ensure a consistent state.
+    -- SetTetrominoVisible covers: SetActorHiddenInGame, TetrominoMesh
+    -- visibility, Particles activation, bIsAnimating, and Capsule collision.
+    return SetTetrominoVisible(item)
 end
 
 return {

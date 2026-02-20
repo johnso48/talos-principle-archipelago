@@ -8,7 +8,6 @@ local Logging = require("lib.logging")
 local TetrominoUtils = require("lib.tetromino_utils")
 local Visibility = require("lib.visibility")
 local Progress = require("lib.progress")
-local Scanner = require("lib.scanner")
 local Inventory = require("lib.inventory")
 local Collection = require("lib.collection")
 local Config = require("lib.config")
@@ -33,9 +32,16 @@ local State = {
     CurrentProgress = nil,
     TrackedItems = {},
     CollectedThisSession = {},
-    LevelTransitionCooldown = 0,
+    -- Start with a moderate cooldown so the 100ms loop doesn't touch UObjects
+    -- while the game engine is still initializing during startup.
+    -- Hooks (ClientRestart, SetTalosSaveGame) will reset this once the
+    -- game world is actually ready.
+    LevelTransitionCooldown = 30,
     LastAddedTetrominoId = nil,
-    ArrangerActive = false  -- true while player is using an arranger/gate
+    ArrangerActive = false,  -- true while player is using an arranger/gate
+    NeedsProgressRefresh = true,  -- deferred flag: find progress on next loop iteration
+    NeedsHUDInit = true,          -- deferred flag: init HUD on next loop iteration
+    NeedsTetrominoScan = true     -- deferred flag: snapshot tetromino positions on next safe tick
 }
 
 -- External callback for Archipelago integration
@@ -95,8 +101,10 @@ GoalDetection.RegisterHooks()
 
 -- ============================================================
 -- Initialize HUD notification overlay
+-- Deferred: actual UMG widget creation happens in the main loop
+-- after the initial startup cooldown expires (State.NeedsHUDInit).
 -- ============================================================
-HUD.Init()
+-- HUD.Init() called after cooldown — see NeedsHUDInit flag
 
 -- ============================================================
 -- Handle tetromino physical pickup event (location checked)
@@ -110,11 +118,6 @@ local function OnTetrominoCollected(tetrominoId)
     -- Mark this location as checked so the item stays hidden
     Collection.MarkLocationChecked(tetrominoId)
     State.CollectedThisSession[tetrominoId] = true
-    
-    -- Clear visibility cache so the fast loop re-evaluates this item
-    if VisibilityApplied then
-        VisibilityApplied[tetrominoId] = nil
-    end
     
     -- Delayed UI refresh: the enforce loop will remove the item from TMap
     -- but the HUD won't update until we explicitly tell it to.
@@ -141,37 +144,19 @@ end
 -- Hook player spawn - this is when we should refresh progress
 -- ============================================================
 RegisterHook("/Script/Engine.PlayerController:ClientRestart", function(Context)
-    Logging.LogDebug("Player spawned - refreshing progress and clearing tracked items")
+    Logging.LogDebug("Player spawned - setting deferred refresh flags")
     
-    -- Force refresh the progress object since we may have loaded a different save
+    -- Do NOT access UObjects synchronously in this hook.
+    -- During save loading, UObjects may be partially initialized and
+    -- UE4SS crashes in its own error handling if an access fails.
+    -- Instead: set flags and let the 100ms loop handle it safely
+    -- after the cooldown expires.
     State.CurrentProgress = nil
-    Progress.FindProgressObject(State, true)
-    
     State.TrackedItems = {}
-    State.LevelTransitionCooldown = 50
-    
-    -- Clear visibility cache — actors are new after level transition
-    VisibilityApplied = {}
-
-    -- Re-initialize HUD widget (previous widget is invalid after level load)
-    HUD.Init()
-    
-    -- Log which save we're now tracking
-    if State.CurrentProgress and State.CurrentProgress:IsValid() then
-        local timePlayed = 0
-        local level = "?"
-        pcall(function() timePlayed = State.CurrentProgress.TimePlayed end)
-        pcall(function() level = State.CurrentProgress.LastPlayedPersistentLevel end)
-        Logging.LogInfo(string.format("Now tracking save with timePlayed=%.0f, level=%s", timePlayed, tostring(level)))
-    end
-    
-    -- Schedule delayed enforcement + scan to ensure everything is fully loaded
-    LoopAsync(2000, function()
-        -- Enforce collection state before scanning so items are collectable
-        Collection.EnforceCollectionState(State)
-        Scanner.ScanTetrominoItems(State, OnTetrominoCollected)
-        return true -- stop after one execution
-    end)
+    State.LevelTransitionCooldown = 15
+    State.NeedsProgressRefresh = true
+    State.NeedsHUDInit = true
+    State.NeedsTetrominoScan = true
 end)
 
 -- ============================================================
@@ -180,24 +165,16 @@ end)
 -- moment to re-acquire the progress object.
 -- ============================================================
 RegisterHook("/Script/Talos.TalosGameInstance:SetTalosSaveGameInstance", function(Context)
-    Logging.LogInfo("Save game instance set on TalosGameInstance — refreshing progress")
-    -- Pause loops during save game transition
-    State.LevelTransitionCooldown = 50
-    VisibilityApplied = {}
+    Logging.LogInfo("Save game instance set on TalosGameInstance — setting deferred refresh")
+    -- Pause loops during save game transition.
+    -- Do NOT access UObjects here — just set flags for the main loop.
+    State.LevelTransitionCooldown = 15
+    State.CurrentProgress = nil
+    State.TrackedItems = {}
+    State.CollectedThisSession = {}
+    State.NeedsProgressRefresh = true
+    State.NeedsTetrominoScan = true
     GoalDetection.ResetGoalState()
-    -- Delay slightly to let the engine finish wiring up
-    LoopAsync(200, function()
-        State.CurrentProgress = nil
-        Progress.FindProgressObject(State, true)
-        State.TrackedItems = {}
-        State.CollectedThisSession = {}
-
-        if State.CurrentProgress then
-            Logging.LogInfo("=== SAVE FILE DUMP (on save game set) ===")
-            Progress.DumpSaveFileContents(State)
-        end
-        return true
-    end)
 end)
 
 -- ============================================================
@@ -207,8 +184,9 @@ RegisterHook("/Script/Talos.TalosGameInstance:ReloadSaveGame", function(Context)
     Logging.LogInfo("ReloadSaveGame called — will re-acquire progress on player spawn")
     State.CurrentProgress = nil
     State.TrackedItems = {}
-    State.LevelTransitionCooldown = 50
-    VisibilityApplied = {}
+    State.LevelTransitionCooldown = 20
+    State.NeedsProgressRefresh = true
+    State.NeedsTetrominoScan = true
     GoalDetection.ResetGoalState()
 end)
 
@@ -216,27 +194,25 @@ end)
 -- Hook level OPEN — fires at the START of a level transition,
 -- before actors are destroyed. This is critical: the other hooks
 -- (ClientRestart, SetTalosSaveGameInstance) only fire AFTER the
--- new level has loaded. Without this, the 5ms visibility loop
--- and 100ms enforcement loop continue accessing actors and TMap
--- references that are being destroyed mid-transition.
+-- new level has loaded. Without this, the 100ms enforcement loop
+-- continues accessing actors and TMap references that are being
+-- destroyed mid-transition.
 -- ============================================================
 pcall(function()
     RegisterHook("/Script/Talos.TalosGameInstance:OpenLevel", function(Context)
         Logging.LogInfo("OpenLevel called — pausing all loops for level transition")
-        State.LevelTransitionCooldown = 100
+        State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
-        VisibilityApplied = {}
     end)
 end)
 
 pcall(function()
     RegisterHook("/Script/Talos.TalosGameInstance:OpenLevelBySoftObjectPtr", function(Context)
         Logging.LogInfo("OpenLevelBySoftObjectPtr called — pausing all loops for level transition")
-        State.LevelTransitionCooldown = 100
+        State.LevelTransitionCooldown = 50
         State.CurrentProgress = nil
         State.TrackedItems = {}
-        VisibilityApplied = {}
     end)
 end)
 
@@ -276,7 +252,7 @@ end
 -- CollectedTetrominos so they remain collectable).
 -- ============================================================
 local LoopCount = 0
-local AP_SYNC_TIMEOUT = 300  -- 30 seconds (300 * 100ms) before enabling enforcement anyway
+local AP_SYNC_TIMEOUT = 0  -- 2 seconds (20 * 100ms) before enabling enforcement anyway
 
 LoopAsync(100, function()
     LoopCount = LoopCount + 1
@@ -311,6 +287,83 @@ LoopAsync(100, function()
         return false
     end
 
+    -- Handle deferred initialization flags set by hook callbacks.
+    -- These run AFTER cooldown expires, when the world is stable.
+    if State.NeedsProgressRefresh then
+        State.NeedsProgressRefresh = false
+        pcall(function()
+            Progress.FindProgressObject(State, true)
+            if State.CurrentProgress and State.CurrentProgress:IsValid() then
+                local timePlayed = 0
+                local level = "?"
+                pcall(function() timePlayed = State.CurrentProgress.TimePlayed end)
+                pcall(function() level = State.CurrentProgress.LastPlayedPersistentLevel end)
+                Logging.LogInfo(string.format("Deferred progress refresh: timePlayed=%.0f, level=%s",
+                    timePlayed, tostring(level)))
+                Progress.DumpSaveFileContents(State)
+            end
+        end)
+    end
+    if State.NeedsHUDInit then
+        State.NeedsHUDInit = false
+        pcall(function()
+            HUD.Init()
+            Logging.LogDebug("Deferred HUD init complete")
+        end)
+    end
+
+    -- ============================================================
+    -- One-time tetromino snapshot: find all BP_TetrominoItem_C actors
+    -- in the level and cache their positions. This replaces the old
+    -- Scanner module that polled every 100ms. Positions are static
+    -- (tetrominos don't move) so we only need to do this once after
+    -- each level load / save reload.
+    -- ============================================================
+    if State.NeedsTetrominoScan then
+        State.NeedsTetrominoScan = false
+        pcall(function()
+            local items = FindAllOf("BP_TetrominoItem_C")
+            if items then
+                local count = 0
+                for _, item in ipairs(items) do
+                    if item and item:IsValid() then
+                        local tetrominoId = TetrominoUtils.GetTetrominoId(item)
+                        if tetrominoId then
+                            local ix, iy, iz = nil, nil, nil
+                            pcall(function()
+                                local loc = item.Root.RelativeLocation
+                                ix = loc.X
+                                iy = loc.Y
+                                iz = loc.Z
+                            end)
+                            local addr = tostring(item:GetAddress())
+                            -- Apply initial visibility state
+                            local visRetries = 0
+                            if Collection.ShouldBeCollectable(tetrominoId) then
+                                Visibility.SetTetrominoVisible(item)
+                                visRetries = 30  -- keep retrying for ~3s
+                            elseif Collection.IsLocationChecked(tetrominoId) and not Collection.IsGranted(tetrominoId) then
+                                Visibility.SetTetrominoHidden(item)
+                            end
+
+                            State.TrackedItems[addr] = {
+                                id = tetrominoId,
+                                item = item,
+                                x = ix,
+                                y = iy,
+                                z = iz,
+                                reported = false,
+                                visRetries = visRetries
+                            }
+                            count = count + 1
+                        end
+                    end
+                end
+                Logging.LogInfo(string.format("Tetromino snapshot: cached %d items with positions", count))
+            end
+        end)
+    end
+
     local ok, err = pcall(function()
         if not State.CurrentProgress or not State.CurrentProgress:IsValid() then
             Progress.FindProgressObject(State)
@@ -329,13 +382,90 @@ LoopAsync(100, function()
                 previousArrangerActive = State.ArrangerActive
             end
             if not State.ArrangerActive then
-                -- Enforce: keep CollectedTetrominos in sync with Archipelago grants
+                -- Enforce: keep CollectedTetrominos in sync with Archipelago grants.
+                -- All granted items stay in TMap (inventory). Non-granted items are removed.
                 Collection.EnforceCollectionState(State)
             end
-            
-            -- Scan for pickup events
-            Scanner.ScanTetrominoItems(State, OnTetrominoCollected)
-            
+
+            -- ============================================================
+            -- Visibility enforcement + proximity-based pickup detection
+            -- ============================================================
+            -- Uses the cached TrackedItems snapshot (positions read once on
+            -- level load). Every 100ms we:
+            --   1. Enforce visibility (show collectable items, hide checked ones)
+            --   2. Compare player position against cached item positions for pickup
+            -- ============================================================
+            if not State.ArrangerActive then
+                -- Get player position once per tick
+                local playerX, playerY, playerZ = nil, nil, nil
+                pcall(function()
+                    local pc = FindFirstOf("PlayerController")
+                    if pc and pc:IsValid() and pc.Pawn and pc.Pawn:IsValid() then
+                        local root = pc.Pawn.RootComponent
+                        if root and root:IsValid() then
+                            local loc = root.RelativeLocation
+                            playerX = loc.X
+                            playerY = loc.Y
+                            playerZ = loc.Z
+                        end
+                    end
+                end)
+
+                local PICKUP_RADIUS_SQ = 250 * 250  -- 250 units (~2.5m) squared
+
+                for addr, info in pairs(State.TrackedItems) do
+                    if info.item and info.id then
+                        local itemValid = false
+                        pcall(function() itemValid = info.item:IsValid() end)
+                        if itemValid then
+                            -- Visibility enforcement
+                            if Collection.ShouldBeCollectable(info.id) then
+                                local needsRestore = false
+                                pcall(function()
+                                    if info.item.bHidden == true then
+                                        needsRestore = true
+                                    elseif info.item.TetrominoMesh and info.item.TetrominoMesh:IsValid() then
+                                        if info.item.TetrominoMesh.bVisible == false then
+                                            needsRestore = true
+                                        elseif info.item.TetrominoMesh.bHiddenInGame == true then
+                                            needsRestore = true
+                                        end
+                                    end
+                                end)
+                                local VISIBILITY_RETRY_COUNT = 30  -- ~3 seconds at 100ms
+                                if needsRestore then
+                                    info.visRetries = VISIBILITY_RETRY_COUNT
+                                end
+                                if info.visRetries > 0 then
+                                    Visibility.SetTetrominoVisible(info.item)
+                                    info.visRetries = info.visRetries - 1
+                                end
+
+                                -- Proximity pickup (only for collectable items)
+                                if playerX and info.x and not info.reported then
+                                    local dx = playerX - info.x
+                                    local dy = playerY - info.y
+                                    local dz = playerZ - info.z
+                                    local distSq = dx*dx + dy*dy + dz*dz
+
+                                    if distSq < PICKUP_RADIUS_SQ then
+                                        Logging.LogInfo(string.format(
+                                            "Proximity pickup: %s (dist=%.0f)",
+                                            info.id, math.sqrt(distSq)))
+                                        info.reported = true
+                                        Visibility.SetTetrominoHidden(info.item)
+                                        OnTetrominoCollected(info.id)
+                                    end
+                                end
+                            elseif Collection.IsLocationChecked(info.id) and not Collection.IsGranted(info.id) then
+                                -- Checked-but-not-granted → hide (sent to another player)
+                                Visibility.SetTetrominoHidden(info.item)
+                            end
+                        end
+                    end
+                end
+            end
+
             -- Goal detection (both endings are hook-driven, this is a no-op keep-alive)
             GoalDetection.CheckGoals(State)
         end
@@ -343,87 +473,6 @@ LoopAsync(100, function()
 
     if not ok then
         Logging.LogError(string.format("Loop error: %s", tostring(err)))
-    end
-
-    return false
-end)
-
--- ============================================================
--- Fast visibility loop — every 5ms manage item visibility
--- Items that should be collectable: force visible + collision
--- Also temporarily removes them from TMap so the game's
--- IsTetrominoCollected check returns false, allowing pickup.
--- The enforce loop (100ms) re-adds granted items to TMap, so
--- they remain usable in arrangers most of the time.
---
--- IMPORTANT: We track which items have already been set to their
--- target state to avoid re-applying visibility every tick.
--- Constantly toggling rendering properties causes DLSS temporal
--- accumulation to corrupt, producing flickering artifacts
--- (especially visible during rain/particle effects).
--- ============================================================
-local VisibilityApplied = {}  -- id -> "visible" | "hidden"
-
-LoopAsync(5, function()
-    -- Skip during level transitions to avoid accessing destroyed actors
-    if State.LevelTransitionCooldown > 0 then
-        return false
-    end
-
-    -- Skip TMap manipulation while arranger is active
-    if State.ArrangerActive then
-        return false
-    end
-
-    -- Bail early if progress is gone (e.g. mid-transition)
-    if not State.CurrentProgress then
-        return false
-    end
-
-    local ok, err = pcall(function()
-        -- Re-validate progress on every tick — it may have been
-        -- destroyed between the nil check above and now
-        if not State.CurrentProgress:IsValid() then
-            State.CurrentProgress = nil
-            return
-        end
-
-        local items = FindAllOf("BP_TetrominoItem_C")
-        if items then
-            for _, item in ipairs(items) do
-                if item and item:IsValid() then
-                    local id = TetrominoUtils.GetTetrominoId(item)
-                    if id then
-                        if Collection.ShouldBeCollectable(id) then
-                            -- Remove from TMap so IsTetrominoCollected returns false
-                            -- This allows OnBeginOverlap to proceed with pickup
-                            if State.CurrentProgress and State.CurrentProgress:IsValid() then
-                                pcall(function()
-                                    State.CurrentProgress.CollectedTetrominos:Remove(id)
-                                end)
-                            end
-                            -- Only touch rendering state once
-                            if VisibilityApplied[id] ~= "visible" then
-                                Visibility.SetTetrominoVisible(item)
-                                VisibilityApplied[id] = "visible"
-                            end
-                        elseif Collection.IsLocationChecked(id) and not Collection.IsGranted(id) then
-                            -- Location was checked but item wasn't granted to us
-                            -- (AP sent it to another player). Hide the actor so
-                            -- it doesn't reappear, but do NOT add to TMap.
-                            if VisibilityApplied[id] ~= "hidden" then
-                                Visibility.SetTetrominoHidden(item)
-                                VisibilityApplied[id] = "hidden"
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end)
-
-    if not ok then
-        Logging.LogError(string.format("Visibility loop error: %s", tostring(err)))
     end
 
     return false

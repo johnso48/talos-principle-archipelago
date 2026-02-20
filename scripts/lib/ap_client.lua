@@ -75,8 +75,13 @@ end
 -- Handlers for AP server events
 -- ============================================================
 
+local socketConnectCount = 0
+local slotConnectCount   = 0
+local printJsonCallCount = 0
+
 local function OnSocketConnected()
-    Logging.LogInfo("AP: Socket connected to server")
+    socketConnectCount = socketConnectCount + 1
+    Logging.LogInfo(string.format("AP: Socket connected to server (socketConnects=%d)", socketConnectCount))
     M.Connected = true
 end
 
@@ -104,13 +109,14 @@ local function OnRoomInfo()
 end
 
 local function OnSlotConnected(slot_data)
+    slotConnectCount = slotConnectCount + 1
     M.SlotConnected = true
     M.SlotData = slot_data
     M.PlayerSlot = ap:get_player_number()
     M.TeamNumber = ap:get_team_number()
 
-    Logging.LogInfo(string.format("AP: Slot connected! player=%d team=%d",
-        M.PlayerSlot or -1, M.TeamNumber or -1))
+    Logging.LogInfo(string.format("AP: Slot connected! player=%d team=%d (slotConnects=%d, printJsonCalls so far=%d)",
+        M.PlayerSlot or -1, M.TeamNumber or -1, slotConnectCount, printJsonCallCount))
 
     -- Reset item counters and granted items for a clean replay.
     -- OnItemsReceived will replay all items from index 0 and rebuild grants.
@@ -227,6 +233,9 @@ local function OnItemsReceived(items)
             -- Show on-screen notification with colored segments
             local senderName = GetPlayerName(item.player)
             local isSelf = (item.player == M.PlayerSlot)
+            Logging.LogInfo(string.format(
+                "AP[ItemNotif]: tetId=%s item.player=%s M.PlayerSlot=%s isSelf=%s",
+                tetId, tostring(item.player), tostring(M.PlayerSlot), tostring(isSelf)))
             if not isSelf then
                 local displayName = ItemMapping.GetDisplayName(item.item) or tetId
                 local flags = item.flags or 0
@@ -235,11 +244,18 @@ local function OnItemsReceived(items)
                 elseif flags & 1 ~= 0 then itemColor = HUD.COLORS.PROGRESSION
                 elseif flags & 2 ~= 0 then itemColor = HUD.COLORS.USEFUL
                 end
+                local notifText = senderName .. " sent you " .. displayName
+                Logging.LogInfo(string.format(
+                    "AP[ItemNotif]: showing HUD notification: '%s'", notifText))
                 HUD.ShowMessage({
                     {text = senderName,    color = HUD.COLORS.PLAYER},
                     {text = " sent you ", color = HUD.COLORS.WHITE},
                     {text = displayName,   color = itemColor},
                 })
+            else
+                Logging.LogInfo(string.format(
+                    "AP[ItemNotif]: SKIPPED (isSelf=true, player=%s == slot=%s)",
+                    tostring(item.player), tostring(M.PlayerSlot)))
             end
         else
             local prefix = ItemMapping.GetItemPrefix(item.item)
@@ -318,13 +334,33 @@ local function BuildColoredSegments(msg)
     return #segs > 0 and segs or nil
 end
 
+-- Messages that match any of these substrings are silently suppressed.
+-- These are noisy server-sent boilerplate messages that add no value in-game.
+local SUPPRESSED_SUBSTRINGS = {
+    "Now that you are connected",   -- AP connection welcome spam
+}
+
+local function IsSuppressed(plain)
+    for _, sub in ipairs(SUPPRESSED_SUBSTRINGS) do
+        if plain:find(sub, 1, true) then
+            return true, sub
+        end
+    end
+    return false
+end
+
 -- Deduplication: track recently shown messages to prevent spam.
--- Key = plain text, value = tickCount when it was last shown.
-local recentMessages = {}
-local DEDUP_WINDOW   = 5   -- seconds; ignore identical messages within this window
+-- Key = plain text, value = os.clock() when it was last shown.
+-- NOTE: os.clock() is CPU time, not wall time. On Windows with low
+-- Lua CPU usage the delta can be near-zero even after many real seconds.
+-- We track both os.clock() and a call counter as diagnostics.
+local recentMessages    = {}
+local DEDUP_WINDOW      = 5   -- seconds (CPU time); may not work reliably — see logs
 
 local function OnPrintJson(msg, extra)
     if not ap then return end
+    printJsonCallCount = printJsonCallCount + 1
+    local callId = printJsonCallCount
 
     -- Try colored segments from raw message parts
     local segments = nil
@@ -342,11 +378,27 @@ local function OnPrintJson(msg, extra)
         local plain = ""
         for _, s in ipairs(segments) do plain = plain .. s.text end
 
-        -- Deduplicate: skip if we showed the exact same text recently
+        -- Filter: drop known boilerplate messages before any further processing
+        local suppressed, matchedRule = IsSuppressed(plain)
+        if suppressed then
+            Logging.LogDebug(string.format(
+                "AP[PrintJson#%d]: suppressed by filter '%s'", callId, matchedRule))
+            return
+        end
+
+        -- Diagnostic: log every OnPrintJson invocation with timing info
         local now = os.clock()
         local lastSeen = recentMessages[plain]
-        if lastSeen and (now - lastSeen) < DEDUP_WINDOW then
-            Logging.LogDebug("AP: Suppressed duplicate: " .. plain)
+        local delta = lastSeen and (now - lastSeen) or -1
+        Logging.LogInfo(string.format(
+            "AP[PrintJson#%d]: plain='%s' os.clock()=%.6f lastSeen=%.6f delta=%.6f",
+            callId, plain:sub(1, 80), now, lastSeen or 0, delta))
+
+        -- Deduplicate: skip if we showed the exact same text recently
+        if lastSeen and delta < DEDUP_WINDOW then
+            Logging.LogInfo(string.format(
+                "AP[PrintJson#%d]: DEDUP HIT (delta=%.6f < window=%d) — suppressed",
+                callId, delta, DEDUP_WINDOW))
             return
         end
         recentMessages[plain] = now
@@ -360,8 +412,11 @@ local function OnPrintJson(msg, extra)
         end
         for _, k in ipairs(staleKeys) do recentMessages[k] = nil end
 
+        Logging.LogInfo(string.format("AP[PrintJson#%d]: passing to HUD.ShowMessage", callId))
         Logging.LogInfo("AP: " .. plain)
         HUD.ShowMessage(segments, 10000)
+    else
+        Logging.LogInfo(string.format("AP[PrintJson#%d]: no segments produced — skipped", callId))
     end
 end
 

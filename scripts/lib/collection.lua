@@ -69,12 +69,7 @@ M.APSynced = false
 
 -- Keep CollectedTetrominos TMap in sync with our collection state.
 -- Rules:
---   Granted items → keep in TMap (usable in arrangers/doors)
---   Checked items → keep in TMap (already picked up, stay collected)
---   Neither granted nor checked → remove from TMap
--- Note: Granted-but-unchecked items that have physical actors in the
--- level are temporarily removed from TMap by the visibility loop so
--- OnBeginOverlap's IsTetrominoCollected check allows pickup.
+--   Granted items → ALWAYS keep in TMap (usable in arrangers/doors)
 function M.EnforceCollectionState(state)
     if not state.CurrentProgress or not state.CurrentProgress:IsValid() then
         return
@@ -118,7 +113,7 @@ function M.EnforceCollectionState(state)
         Logging.LogDebug(string.format("Enforced: removed %d non-granted items from TMap", #toRemove))
     end
 
-    -- Ensure all granted items are in TMap (usable in arrangers/doors)
+    -- Ensure all granted items are in TMap (usable in arrangers/doors).
     -- Use TMapAddPreserving so we don't reset the door-usage flag.
     for id, _ in pairs(M.GrantedItems) do
         pcall(function()
