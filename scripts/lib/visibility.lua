@@ -1,19 +1,6 @@
 -- ============================================================
 -- Tetromino visibility and collision management
 -- ============================================================
---
--- IMPORTANT: SetTetrominoVisible / SetTetrominoHidden are called
--- from LoopAsync (worker thread). Angelscript-defined UFunctions
--- like UnhideTetromino() / HideTetromino() CRASH on the worker
--- thread due to a corrupted Activate TArray on tetromino actors.
---
--- Therefore these functions use ONLY:
---   - SetActorHiddenInGame(bool) — C++ UFunction, safe from any thread
---   - Direct property writes (bIsAnimating, Capsule collision)
---
--- UnhideTetrominoFull() uses the game's own UnhideTetromino() and
--- is ONLY safe from the game thread (keybind handlers, hooks).
--- ============================================================
 
 local Logging = require("lib.logging")
 
@@ -30,6 +17,12 @@ local function SetTetrominoVisible(item)
     if not item or not item:IsValid() then 
         return false
     end
+
+    local ok, err = pcall(function()
+        ExecuteInGameThread (function () 
+            item:UnhideTetromino()
+        end)
+    end)
     
     local success = false
     
@@ -86,6 +79,12 @@ local function SetTetrominoHidden(item)
         return false
     end
 
+    local ok, err = pcall(function()
+        ExecuteInGameThread (function () 
+            item:HideTetromino()
+        end)
+    end)
+
     local success = false
 
     pcall(function()
@@ -122,38 +121,7 @@ local function SetTetrominoHidden(item)
     return success
 end
 
--- Full unhide using the game's own UnhideTetromino().
--- ONLY call from game thread (keybind handlers, hooks) — NOT from LoopAsync.
--- This properly restores particle systems and animation state that
--- SetActorHiddenInGame alone cannot.
---
--- NOTE: UnhideTetromino() is an AngelScript UFunction. UE4SS often crashes
--- calling it ("Array failed invariants check, ArrayNum exceeds ArrayMax")
--- because it encounters the Activate TArray<ASkeletalMeshActor*> during
--- reflection. The fallback SetTetrominoVisible() now handles per-component
--- visibility so items will appear correctly even when UnhideTetromino fails.
-local function UnhideTetrominoFull(item)
-    if not item or not item:IsValid() then
-        return false
-    end
-    
-    local ok, err = pcall(function()
-        item:UnhideTetromino()
-    end)
-    
-    if not ok then
-        Logging.LogDebug(string.format("UnhideTetromino() call failed (using component-level fallback): %s", tostring(err)))
-    end
-
-    -- Always run the component-level visibility restore, even if
-    -- UnhideTetromino() succeeded, to ensure a consistent state.
-    -- SetTetrominoVisible covers: SetActorHiddenInGame, TetrominoMesh
-    -- visibility, Particles activation, bIsAnimating, and Capsule collision.
-    return SetTetrominoVisible(item)
-end
-
 return {
     SetTetrominoVisible = SetTetrominoVisible,
-    SetTetrominoHidden = SetTetrominoHidden,
-    UnhideTetrominoFull = UnhideTetrominoFull
+    SetTetrominoHidden = SetTetrominoHidden
 }

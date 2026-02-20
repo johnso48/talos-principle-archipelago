@@ -360,6 +360,11 @@ LoopAsync(100, function()
                     end
                 end
                 Logging.LogInfo(string.format("Tetromino snapshot: cached %d items with positions", count))
+                for addr, info in pairs(State.TrackedItems) do
+                    Logging.LogInfo(string.format("  Tracked: %s @ (%.1f, %.1f, %.1f)",
+                        tostring(info.id),
+                        info.x or 0, info.y or 0, info.z or 0))
+                end
             end
         end)
     end
@@ -514,6 +519,52 @@ RegisterKeyBind(Key.F6, function()
     end
     
     Progress.DumpSaveFileContents(State)
+end)
+
+-- F7: Force visibility enforcement on all tetrominos in the current level.
+-- For each tetromino actor:
+--   Collectable (location not checked) → remove from TMap + unhide via game API
+--   Checked but not granted (sent to another player) → hide
+-- Logs every action so you can verify what the game does.
+-- Runs on the game thread (keybind callback), so UObject access is safe here.
+RegisterKeyBind(Key.F7, function()
+    Logging.LogInfo("=== F7: Manual visibility enforcement ===")
+    Progress.FindProgressObject(State, true)
+
+    if not State.CurrentProgress or not State.CurrentProgress:IsValid() then
+        Logging.LogWarning("F7: No valid progress object — cannot enforce visibility")
+        return
+    end
+
+    local items = FindAllOf("BP_TetrominoItem_C")
+    if not items then
+        Logging.LogWarning("F7: No BP_TetrominoItem_C actors found in level")
+        return
+    end
+
+    local madeVisible, hidden, skipped = 0, 0, 0
+    for _, item in ipairs(items) do
+        if item and item:IsValid() then
+            local id = TetrominoUtils.GetTetrominoId(item)
+            if id then
+                if Collection.ShouldBeCollectable(id) then
+                    -- Make the item visible — do NOT touch the TMap
+                    Visibility.SetTetrominoVisible(item)
+                    madeVisible = madeVisible + 1
+                    Logging.LogInfo(string.format("  [VISIBLE] %s", id))
+                elseif Collection.IsLocationChecked(id) and not Collection.IsGranted(id) then
+                    Visibility.SetTetrominoHidden(item)
+                    hidden = hidden + 1
+                    Logging.LogInfo(string.format("  [HIDDEN]  %s (checked, not granted)", id))
+                else
+                    skipped = skipped + 1
+                end
+            end
+        end
+    end
+
+    Logging.LogInfo(string.format("F7 done: %d visible, %d hidden, %d skipped (of %d actors)",
+        madeVisible, hidden, skipped, #items))
 end)
 
 -- F8: Grant ALL gate items (Connector + Hexahedron + Fans + Playback + all gates through World C)
