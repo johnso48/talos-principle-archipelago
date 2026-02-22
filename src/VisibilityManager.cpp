@@ -2,9 +2,10 @@
 
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UObject.hpp>
-#include <Unreal/UFunction.hpp>
-#include <Unreal/FProperty.hpp>
+#include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <DynamicOutput/DynamicOutput.hpp>
 
 #include <vector>
@@ -14,6 +15,21 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace TalosAP {
+
+// ============================================================
+// IsValidUObject — safely test a UObject* pointer via GUObjectArray
+// (FWeakObjectPtr resolves through the serial-number table so this
+// will return false for any GC'd / freed / pending-kill object).
+// ============================================================
+static bool IsValidUObject(UObject* obj)
+{
+    if (!obj) return false;
+    // Construct a weak ptr — its ctor walks GUObjectArray.  If the
+    // object is gone the serial numbers won't match and Get() will
+    // return nullptr without touching the object's memory.
+    FWeakObjectPtr weak(obj);
+    return weak.Get(false) != nullptr;
+}
 
 // ============================================================
 // Type/Shape → Letter lookups
@@ -153,90 +169,85 @@ bool VisibilityManager::GetPlayerPosition(float& outX, float& outY, float& outZ)
 
 void VisibilityManager::SetActorVisible(UObject* actor)
 {
-    if (!actor) return;
+    // Validate actor is still live in GUObjectArray before any vtable use.
+    if (!IsValidUObject(actor)) return;
 
-    try {
-        auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-        if (!rootCompPtr || !*rootCompPtr) return;
-        UObject* rootComp = *rootCompPtr;
+    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+    if (!rootCompPtr || !*rootCompPtr) return;
+    UObject* rootComp = *rootCompPtr;
 
-        // SetVisibility(true) — root only, do NOT propagate to children.
-        // Propagation interferes with the game's animation system and
-        // collection sequence (mesh fade, particle despawn).
-        auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
-        if (setVisFunc) {
-            struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
-            params.bNewVisibility = true;
-            params.bPropagateToChildren = true;
-            rootComp->ProcessEvent(setVisFunc, &params);
-        }
+    // Validate the component pointer too — it may have been GC'd separately.
+    if (!IsValidUObject(rootComp)) return;
 
-        // SetHiddenInGame(false) — root only, do NOT propagate.
-        auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
-        if (setHiddenFunc) {
-            struct { bool NewHidden; bool bPropagateToChildren; } params{};
-            params.NewHidden = false;
-            params.bPropagateToChildren = true;
-            rootComp->ProcessEvent(setHiddenFunc, &params);
-        }
+    // SetVisibility(true) — root only, do NOT propagate to children.
+    // Propagation interferes with the game's animation system and
+    // collection sequence (mesh fade, particle despawn).
+    auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
+    if (setVisFunc) {
+        struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
+        params.bNewVisibility = true;
+        params.bPropagateToChildren = true;
+        rootComp->ProcessEvent(setVisFunc, &params);
     }
-    catch (...) {
-        // Silently fail — actor may have been GC'd
+
+    // SetHiddenInGame(false) — root only, do NOT propagate.
+    auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
+    if (setHiddenFunc) {
+        struct { bool NewHidden; bool bPropagateToChildren; } params{};
+        params.NewHidden = false;
+        params.bPropagateToChildren = true;
+        rootComp->ProcessEvent(setHiddenFunc, &params);
     }
 }
 
 void VisibilityManager::SetActorHidden(UObject* actor)
 {
-    if (!actor) return;
+    // Validate actor is still live in GUObjectArray before any vtable use.
+    if (!IsValidUObject(actor)) return;
 
-    try {
-        auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-        if (!rootCompPtr || !*rootCompPtr) return;
-        UObject* rootComp = *rootCompPtr;
+    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+    if (!rootCompPtr || !*rootCompPtr) return;
+    UObject* rootComp = *rootCompPtr;
 
-        auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
-        if (setVisFunc) {
-            struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
-            params.bNewVisibility = false;
-            params.bPropagateToChildren = false;
-            rootComp->ProcessEvent(setVisFunc, &params);
-        }
+    // Validate the component pointer too — it may have been GC'd separately.
+    if (!IsValidUObject(rootComp)) return;
 
-        auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
-        if (setHiddenFunc) {
-            struct { bool NewHidden; bool bPropagateToChildren; } params{};
-            params.NewHidden = true;
-            params.bPropagateToChildren = false;
-            rootComp->ProcessEvent(setHiddenFunc, &params);
-        }
+    auto* setVisFunc = rootComp->GetFunctionByNameInChain(STR("SetVisibility"));
+    if (setVisFunc) {
+        struct { bool bNewVisibility; bool bPropagateToChildren; } params{};
+        params.bNewVisibility = false;
+        params.bPropagateToChildren = true;
+        rootComp->ProcessEvent(setVisFunc, &params);
     }
-    catch (...) {
-        // Silently fail
+
+    auto* setHiddenFunc = rootComp->GetFunctionByNameInChain(STR("SetHiddenInGame"));
+    if (setHiddenFunc) {
+        struct { bool NewHidden; bool bPropagateToChildren; } params{};
+        params.NewHidden = true;
+        params.bPropagateToChildren = true;
+        rootComp->ProcessEvent(setHiddenFunc, &params);
     }
 }
 
 bool VisibilityManager::IsActorHidden(UObject* actor)
 {
-    if (!actor) return false;
+    if (!IsValidUObject(actor)) return false;
 
-    try {
-        // Check Root SceneComponent visibility state (matches our SetActorVisible/Hidden).
-        // bVisible=false or bHiddenInGame=true means the item is hidden.
-        auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
-        if (!rootCompPtr || !*rootCompPtr) return false;
-        UObject* rootComp = *rootCompPtr;
+    // Check Root SceneComponent visibility state (matches our SetActorVisible/Hidden).
+    // bVisible=false or bHiddenInGame=true means the item is hidden.
+    auto* rootCompPtr = actor->GetValuePtrByPropertyNameInChain<UObject*>(STR("RootComponent"));
+    if (!rootCompPtr || !*rootCompPtr) return false;
+    UObject* rootComp = *rootCompPtr;
 
-        auto* visiblePtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bVisible"));
-        if (visiblePtr && !*visiblePtr) return true;
+    if (!IsValidUObject(rootComp)) return false;
 
-        auto* hiddenPtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bHiddenInGame"));
-        if (hiddenPtr && *hiddenPtr) return true;
+    auto* visiblePtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bVisible"));
+    if (visiblePtr && !*visiblePtr) return true;
 
-        return false;
-    }
-    catch (...) {
-        return false;
-    }
+    auto* hiddenPtr = rootComp->GetValuePtrByPropertyNameInChain<bool>(STR("bHiddenInGame"));
+    if (hiddenPtr && *hiddenPtr) return true;
+
+    return false;
 }
 
 // ============================================================
@@ -758,9 +769,14 @@ void VisibilityManager::ProcessPendingFenceOpens()
 
             for (auto* fence : fences) {
                 if (!fence) continue;
+                if (!IsValidUObject(fence)) continue;
                 try {
                     if (fence->GetFullName() == entry.fenceFullName) {
-                        // Found the fence — call Open()
+                        // Found the fence — validate UFunction is still live then call Open()
+                        if (!IsValidUObject(m_fnFenceOpen)) {
+                            m_fnFenceOpen = nullptr;  // force re-lookup next tick
+                            break;
+                        }
                         fence->ProcessEvent(m_fnFenceOpen, nullptr);
                         opened = true;
                         break;
