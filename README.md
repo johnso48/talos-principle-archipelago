@@ -2,11 +2,6 @@
 
 A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/1938910/The_Talos_Principle_Reawakened/) that integrates with [Archipelago](https://archipelago.gg/) multiworld randomizer.
 
-## Features
-
-- **Real-time Sync**: Locations and items sync automatically via WebSocket connection
-- **Debug Tools**: F5-F8 keybinds for testing grants and inspecting state
-
 ## Installation
 
 ### Prerequisites
@@ -34,11 +29,6 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
    - Download the latest release
    - Extract to `Talos1/Binaries/Win64/ue4ss/Mods/ArchipelagoMod/`
 
-3. **Install lua-apclientpp**:
-   - Download [lua-apclientpp v0.6.4+](https://github.com/black-sliver/lua-apclientpp/releases) (`lua54.7z`)
-   - Extract the **`lua54-clang64-static`** build
-   - Copy `lua-apclientpp.dll` to `Talos1/Binaries/Win64/ue4ss/Mods/ArchipelagoMod/scripts/` folder
-
 4. **Configure connection**:
    - Open the `config.json` file
    - Edit with your AP server details:
@@ -55,7 +45,7 @@ A mod for [The Talos Principle Reawakened](https://store.steampowered.com/app/19
 
 ## Configuration
 
-Edit `scripts/config.json`:
+Edit `config.json`:
 
 - **server**: AP server address and port (e.g. `archipelago.gg:38281`)
 - **slot_name**: Your player/slot name in the multiworld
@@ -65,4 +55,3 @@ Edit `scripts/config.json`:
 ## Debug Keybinds
 
 - **F6**: Dump full state (collection, inventory, progress)
-- **F8**: Grants all tetrominos

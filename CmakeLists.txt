@@ -1,0 +1,127 @@
+cmake_minimum_required(VERSION 3.22)
+
+set(TARGET TalosPrincipleArchipelagoClient)
+
+# ==============================================================================
+# Dependencies via FetchContent
+# ==============================================================================
+include(FetchContent)
+
+# nlohmann/json — JSON parsing (required by apclientpp)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+
+# standalone ASIO — async I/O (required by websocketpp)
+FetchContent_Declare(
+    asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG        asio-1-30-2
+)
+
+# websocketpp — WebSocket client (required by wswrap)
+FetchContent_Declare(
+    websocketpp
+    GIT_REPOSITORY https://github.com/zaphoyd/websocketpp.git
+    GIT_TAG        0.8.2
+)
+
+# valijson — JSON schema validation (required by apclientpp)
+FetchContent_Declare(
+    valijson
+    GIT_REPOSITORY https://github.com/tristanpenman/valijson.git
+    GIT_TAG        v1.0.2
+)
+set(valijson_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(valijson_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(valijson_INSTALL_HEADERS OFF CACHE BOOL "" FORCE)
+
+# apclientpp — Archipelago client (header-only)
+FetchContent_Declare(
+    apclientpp
+    GIT_REPOSITORY https://github.com/black-sliver/apclientpp.git
+    GIT_TAG        557d70c
+)
+set(APCLIENTPP_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+
+# wswrap — WebSocket wrapper used by apclientpp
+FetchContent_Declare(
+    wswrap
+    GIT_REPOSITORY https://github.com/black-sliver/wswrap.git
+    GIT_TAG        d0505e0ec53a26743f11051949a0dc66bcf44951
+)
+
+FetchContent_MakeAvailable(nlohmann_json valijson apclientpp wswrap)
+
+# ASIO and websocketpp are header-only, just populate them
+FetchContent_GetProperties(asio)
+if(NOT asio_POPULATED)
+    FetchContent_Populate(asio)
+endif()
+
+FetchContent_GetProperties(websocketpp)
+if(NOT websocketpp_POPULATED)
+    FetchContent_Populate(websocketpp)
+endif()
+
+# ==============================================================================
+# Mod target
+# ==============================================================================
+add_library(${TARGET} SHARED
+    dllmain.cpp
+    src/Config.cpp
+    src/ItemMapping.cpp
+    src/APClient.cpp
+    src/InventorySync.cpp
+    src/LevelTransitionHandler.cpp
+    src/SaveGameHandler.cpp
+    src/VisibilityManager.cpp
+    src/HudNotification.cpp
+)
+
+target_include_directories(${TARGET} PRIVATE
+    .
+    src
+    src/headers
+    ${asio_SOURCE_DIR}/asio/include
+    ${websocketpp_SOURCE_DIR}
+    ${apclientpp_SOURCE_DIR}
+    ${wswrap_SOURCE_DIR}/include
+)
+
+target_link_libraries(${TARGET} PUBLIC
+    UE4SS
+    nlohmann_json::nlohmann_json
+    ValiJSON::valijson
+)
+
+# Windows sockets (required by ASIO/websocketpp)
+target_link_libraries(${TARGET} PRIVATE ws2_32 crypt32)
+
+# Preprocessor definitions for standalone ASIO + websocketpp backend
+target_compile_definitions(${TARGET} PRIVATE
+    ASIO_STANDALONE
+    _WEBSOCKETPP_CPP11_STL_
+    _WEBSOCKETPP_CPP11_THREAD_
+    WSWRAP_WITH_WEBSOCKETPP
+    WSWRAP_NO_SSL
+    WSWRAP_NO_COMPRESSION
+    _WIN32_WINNT=0x0601
+    WIN32_LEAN_AND_MEAN
+)
+
+# MSVC-specific flags
+if(MSVC)
+    target_compile_options(${TARGET} PRIVATE /Zc:__cplusplus /bigobj)
+endif()
+
+# C++20 for UE4SS compatibility
+target_compile_features(${TARGET} PRIVATE cxx_std_20)
+
+# Copy the DLL to the game's mod directory after building (optional, adjust path as needed)
+# add_custom_command(TARGET ${TARGET} POST_BUILD
+#     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${TARGET}> "path/to/game/Binaries/Win64/Mods/${TARGET}/dlls/"
+# )
